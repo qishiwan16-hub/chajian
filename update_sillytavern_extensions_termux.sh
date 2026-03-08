@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/sh
+ge#!/data/data/com.termux/files/usr/bin/sh
 #
 # update_sillytavern_extensions_termux.sh
 #
@@ -154,6 +154,42 @@ prompt_for_st_root() {
     done
 }
 
+# 使用非交互 Git，避免远程仓库转私有/失效时卡在认证输入。
+git_non_interactive() {
+    GIT_TERMINAL_PROMPT=0 \
+    GCM_INTERACTIVE=Never \
+    GIT_SSH_COMMAND='ssh -oBatchMode=yes' \
+    git "$@"
+}
+
+is_remote_access_issue() {
+    message=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+
+    case "$message" in
+        *"authentication failed"*|\
+        *"authentication required"*|\
+        *"could not read username"*|\
+        *"could not read password"*|\
+        *"terminal prompts disabled"*|\
+        *"repository not found"*|\
+        *"requested url returned error: 401"*|\
+        *"requested url returned error: 403"*|\
+        *"requested url returned error: 404"*|\
+        *"access denied"*|\
+        *"permission denied"*|\
+        *"unauthorized"*|\
+        *"forbidden"*|\
+        *"not authorized"*|\
+        *"support for password authentication was removed"*|\
+        *"does not appear to be a git repository"*|\
+        *"could not read from remote repository"*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
 scan_extensions_dir() {
     base_dir=$1
     label=$2
@@ -185,19 +221,39 @@ scan_extensions_dir() {
             continue
         fi
 
-        fetch_output=$(git -C "$repo_dir" fetch --all --prune 2>&1)
-        fetch_status=$?
-        if [ "$fetch_status" -ne 0 ]; then
-            failed_count=$((failed_count + 1))
-            printf '  -> [失败] fetch 失败\n'
-            printf '%s\n\n' "$fetch_output"
-            continue
-        fi
-
         upstream_ref=$(git -C "$repo_dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
         if [ -z "$upstream_ref" ]; then
             skipped_count=$((skipped_count + 1))
             printf '  -> [跳过] Git 仓库未配置上游分支\n\n'
+            continue
+        fi
+
+        remote_name=${upstream_ref%%/*}
+        remote_check_output=$(git_non_interactive -C "$repo_dir" ls-remote --quiet "$remote_name" HEAD 2>&1)
+        remote_check_status=$?
+        if [ "$remote_check_status" -ne 0 ]; then
+            if is_remote_access_issue "$remote_check_output"; then
+                skipped_count=$((skipped_count + 1))
+                printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
+            else
+                failed_count=$((failed_count + 1))
+                printf '  -> [失败] 无法访问远程仓库\n'
+            fi
+            printf '%s\n\n' "$remote_check_output"
+            continue
+        fi
+
+        fetch_output=$(git_non_interactive -C "$repo_dir" fetch --all --prune 2>&1)
+        fetch_status=$?
+        if [ "$fetch_status" -ne 0 ]; then
+            if is_remote_access_issue "$fetch_output"; then
+                skipped_count=$((skipped_count + 1))
+                printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
+            else
+                failed_count=$((failed_count + 1))
+                printf '  -> [失败] fetch 失败\n'
+            fi
+            printf '%s\n\n' "$fetch_output"
             continue
         fi
 
@@ -222,7 +278,7 @@ scan_extensions_dir() {
             continue
         fi
 
-        pull_output=$(git -C "$repo_dir" pull --ff-only 2>&1)
+        pull_output=$(git_non_interactive -C "$repo_dir" pull --ff-only 2>&1)
         pull_status=$?
         if [ "$pull_status" -eq 0 ]; then
             updated_count=$((updated_count + 1))
@@ -232,8 +288,13 @@ scan_extensions_dir() {
             fi
             printf '\n'
         else
-            failed_count=$((failed_count + 1))
-            printf '  -> [失败] pull 失败\n'
+            if is_remote_access_issue "$pull_output"; then
+                skipped_count=$((skipped_count + 1))
+                printf '  -> [跳过] 拉取时远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
+            else
+                failed_count=$((failed_count + 1))
+                printf '  -> [失败] pull 失败\n'
+            fi
             printf '%s\n\n' "$pull_output"
         fi
     done
