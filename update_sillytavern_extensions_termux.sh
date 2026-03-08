@@ -6,21 +6,11 @@
 #   chmod +x ./update_sillytavern_extensions_termux.sh
 #   ./update_sillytavern_extensions_termux.sh
 #
-# 或者直接用 shell 执行：
-#   sh ./update_sillytavern_extensions_termux.sh
+# 也可选传：
+#   ./update_sillytavern_extensions_termux.sh <SillyTavern根目录> <用户目录名>
 #
-# 脚本作用：
-#   1. 提示输入 SillyTavern 根目录，回车时默认使用 $HOME/SillyTavern
-#   2. 提示输入用户目录名，回车时默认使用 default-user
-#   3. 依次扫描以下两个扩展总目录下的“直接子目录”：
-#      - public/scripts/extensions/third-party
-#      - data/<用户名>/extensions
-#   4. 如果子目录是 Git 仓库，则执行 fetch + pull 检查并更新
-#   5. 如果不是 Git 仓库，或仓库未配置上游分支，则跳过并提示
-#   6. 最后输出本次批量检查的统计结果
-#
-# 依赖：
-#   - git
+# 环境变量同样可用：
+#   ST_ROOT=/path/to/SillyTavern ST_USER_NAME=default-user sh ./update_sillytavern_extensions_termux.sh
 
 DEFAULT_ST_ROOT="$HOME/SillyTavern"
 DEFAULT_USER_NAME="default-user"
@@ -55,6 +45,113 @@ trim_trailing_slash() {
     done
 
     printf '%s\n' "$path_value"
+}
+
+is_sillytavern_root() {
+    root_path=$1
+
+    [ -n "$root_path" ] || return 1
+    [ -d "$root_path" ] || return 1
+    [ -d "$root_path/public" ] || return 1
+    [ -d "$root_path/data" ] || return 1
+    [ -d "$root_path/public/scripts/extensions" ] || return 1
+
+    return 0
+}
+
+find_root_in_ancestors() {
+    start_path=$1
+
+    [ -n "$start_path" ] || return 1
+    [ -d "$start_path" ] || return 1
+
+    current_path=$(trim_trailing_slash "$start_path")
+
+    while :; do
+        if is_sillytavern_root "$current_path"; then
+            printf '%s\n' "$current_path"
+            return 0
+        fi
+
+        if [ "$current_path" = "/" ]; then
+            break
+        fi
+
+        parent_path=${current_path%/*}
+        if [ -z "$parent_path" ]; then
+            parent_path="/"
+        fi
+
+        if [ "$parent_path" = "$current_path" ]; then
+            break
+        fi
+
+        current_path=$parent_path
+    done
+
+    return 1
+}
+
+detect_sillytavern_root() {
+    current_dir=$(pwd 2>/dev/null)
+    if [ -n "$current_dir" ]; then
+        detected_root=$(find_root_in_ancestors "$current_dir")
+        if [ -n "$detected_root" ]; then
+            printf '%s\n' "$detected_root"
+            return 0
+        fi
+    fi
+
+    script_dir=$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd)
+    if [ -n "$script_dir" ]; then
+        detected_root=$(find_root_in_ancestors "$script_dir")
+        if [ -n "$detected_root" ]; then
+            printf '%s\n' "$detected_root"
+            return 0
+        fi
+    fi
+
+    for candidate in \
+        "$HOME/SillyTavern" \
+        "$HOME/sillytavern" \
+        "$HOME/storage/shared/SillyTavern" \
+        "$HOME/storage/shared/sillytavern" \
+        "/storage/emulated/0/SillyTavern" \
+        "/storage/emulated/0/sillytavern" \
+        "/sdcard/SillyTavern" \
+        "/sdcard/sillytavern"
+    do
+        candidate=$(trim_trailing_slash "$candidate")
+        if is_sillytavern_root "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+prompt_for_st_root() {
+    while :; do
+        printf '未自动识别 SillyTavern 根目录，请输入路径（直接回车使用默认值：%s）：' "$DEFAULT_ST_ROOT"
+        IFS= read -r manual_root
+
+        if [ -z "$manual_root" ]; then
+            selected_root=$DEFAULT_ST_ROOT
+        else
+            selected_root=$(expand_home_path "$manual_root")
+        fi
+
+        selected_root=$(trim_trailing_slash "$selected_root")
+
+        if is_sillytavern_root "$selected_root"; then
+            printf '%s\n' "$selected_root"
+            return 0
+        fi
+
+        printf '输入的目录看起来不是 SillyTavern 根目录：%s\n' "$selected_root"
+        printf '请确认该目录下能看到 public 和 data。\n\n'
+    done
 }
 
 scan_extensions_dir() {
@@ -148,24 +245,50 @@ if ! command -v git >/dev/null 2>&1; then
     exit 1
 fi
 
-printf '请输入 SillyTavern 根目录（直接回车使用默认值：%s）：' "$DEFAULT_ST_ROOT"
-IFS= read -r input_st_root
+input_st_root=$1
+input_user_name=$2
 
-if [ -z "$input_st_root" ]; then
-    st_root=$DEFAULT_ST_ROOT
-else
-    st_root=$(expand_home_path "$input_st_root")
+if [ -z "$input_st_root" ] && [ -n "$ST_ROOT" ]; then
+    input_st_root=$ST_ROOT
 fi
 
-st_root=$(trim_trailing_slash "$st_root")
+if [ -z "$input_user_name" ] && [ -n "$ST_USER_NAME" ]; then
+    input_user_name=$ST_USER_NAME
+fi
 
-printf '请输入用户目录名（直接回车使用默认值：%s）：' "$DEFAULT_USER_NAME"
-IFS= read -r input_user_name
+if [ -n "$input_st_root" ]; then
+    st_root=$(expand_home_path "$input_st_root")
+    st_root=$(trim_trailing_slash "$st_root")
 
-if [ -z "$input_user_name" ]; then
-    user_name=$DEFAULT_USER_NAME
+    if ! is_sillytavern_root "$st_root"; then
+        printf '错误：指定的 SillyTavern 根目录无效：%s\n' "$st_root"
+        printf '请确认该目录下能看到 public 和 data。\n'
+        exit 1
+    fi
+
+    printf '已使用指定的 SillyTavern 根目录：%s\n' "$st_root"
 else
+    st_root=$(detect_sillytavern_root)
+    if [ -n "$st_root" ]; then
+        printf '已自动识别 SillyTavern 根目录：%s\n' "$st_root"
+    else
+        st_root=$(prompt_for_st_root)
+        printf '已使用手动输入的 SillyTavern 根目录：%s\n' "$st_root"
+    fi
+fi
+
+if [ -n "$input_user_name" ]; then
     user_name=$input_user_name
+    printf '已使用指定的用户目录名：%s\n' "$user_name"
+else
+    printf '请输入用户目录名（直接回车使用默认值：%s）：' "$DEFAULT_USER_NAME"
+    IFS= read -r input_user_name
+
+    if [ -z "$input_user_name" ]; then
+        user_name=$DEFAULT_USER_NAME
+    else
+        user_name=$input_user_name
+    fi
 fi
 
 third_party_dir="$st_root/public/scripts/extensions/third-party"
@@ -179,6 +302,8 @@ scan_extensions_dir "$third_party_dir" "第三方扩展目录"
 scan_extensions_dir "$user_extensions_dir" "用户扩展目录"
 
 printf '\n==== 汇总统计 ====\n'
+printf 'SillyTavern 根目录：%s\n' "$st_root"
+printf '用户目录名：%s\n' "$user_name"
 printf '已检查子目录：%s\n' "$checked_count"
 printf '已更新仓库：%s\n' "$updated_count"
 printf '无更新仓库：%s\n' "$no_update_count"
