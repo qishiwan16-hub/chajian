@@ -1,8 +1,8 @@
 # SillyTavern 扩展管理脚本
 
-用于在 Termux 中管理和更新 SillyTavern 扩展，也可在电脑上用 `bash` 运行基础功能。
+用于在 Termux 中管理和更新 SillyTavern 扩展，也可在电脑上用 `bash` 运行基础功能。当前项目同时提供了一个本地轻量 Web 面板：后端使用 Python 标准库，前端使用原生 HTML / CSS / JS，底层仍由 Bash 脚本执行真实插件操作。
 
-## 使用
+## 快速开始
 
 先安装 Git，然后拉取本项目：
 
@@ -11,21 +11,48 @@ git clone https://github.com/qishiwan16-hub/chajian.git
 cd chajian
 ```
 
+### 依赖
+
+- Git
+- Bash（Termux 可直接安装；桌面端推荐 Git Bash）
+- Python 3（仅 Web 面板需要，使用标准库，无需额外 `pip install`）
+
 Termux 里建议先安装 Git：
 
 ```sh
 pkg install git
 ```
 
+### CLI 菜单启动
+
 进入项目目录后，直接执行：
 
 ```sh
-cd chajian
 bash ./update_sillytavern_extensions_termux.sh
 ```
 
 启动后会直接进入脚本面板，输入对应数字即可进入功能。
-新增了“批量更新脚本”，可先看插件列表，再按序号只更新指定插件。
+
+### Web 面板启动
+
+在项目目录执行：
+
+```sh
+python web_panel_server.py
+```
+
+默认监听地址为 `http://127.0.0.1:8765` 。如果需要，也可以通过 `--host`、`--port`、`--timeout`、`--bash` 调整监听参数、脚本超时和 Bash 路径。
+
+Web 面板核心能力：
+
+- 顶部概览统计卡片
+- 插件列表、搜索、状态筛选、来源筛选
+- 批量选择、批量更新、全量更新
+- 单插件更新、白名单加入/移除、删除插件
+- 设置默认用户名、默认 SillyTavern 根目录、Termux 自动检测更新
+- 友好名按“元数据 → 映射文件 → 目录名”回退
+
+前端只消费后端 JSON，不解析终端文本输出。
 
 ## 菜单功能
 
@@ -121,11 +148,16 @@ bash ./update_sillytavern_extensions_termux.sh
 目前支持：
 
 - 默认用户名
+- 默认 SillyTavern 根目录
 - 打开 Termux 时自动检测更新
 
 ### 默认用户名
 
 设置后，更新、插件查看、删除插件时都会优先使用这个用户名，直接回车即可继续。
+
+### 默认 SillyTavern 根目录
+
+设置后，CLI 和 Web 面板都会优先使用这个根目录查找扩展；未设置时仍会按原有逻辑自动检测。
 
 ### 打开 Termux 时自动检测更新
 
@@ -135,15 +167,34 @@ bash ./update_sillytavern_extensions_termux.sh
 
 这个自动启动逻辑只在 Termux 下生效；在电脑上运行脚本时，不会去改你本机的 shell 启动文件。
 
-## 补充：参数方式
+## JSON / 命令模式
 
-如果你明确想跳过面板，也可以直接执行更新：
+如果你明确想跳过交互面板，也可以直接执行命令模式。
+
+### 直接执行更新
 
 ```sh
 bash ./update_sillytavern_extensions_termux.sh --run-update
 ```
 
-`--auto-start-check` 仅供“打开 Termux 时自动检测更新”功能内部使用。
+### JSON 模式示例
+
+```sh
+bash ./update_sillytavern_extensions_termux.sh --json settings-get
+bash ./update_sillytavern_extensions_termux.sh --json whitelist-get
+bash ./update_sillytavern_extensions_termux.sh --json overview
+bash ./update_sillytavern_extensions_termux.sh --json update-selected --plugins ext-a,ext-b
+```
+
+当前 JSON 模式已覆盖：
+
+- 插件列表 / 概览状态
+- 全量更新 / 指定目录名批量更新
+- 白名单查看 / 添加 / 移除
+- 删除插件
+- 设置读取 / 保存
+
+`--auto-start-check` 仍仅供“打开 Termux 时自动检测更新”功能内部使用。
 
 ## 补充说明
 

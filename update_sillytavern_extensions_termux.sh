@@ -11,6 +11,18 @@
 #   ./update_sillytavern_extensions_termux.sh --run-update [SillyTavern根目录] [用户目录名]
 #   ./update_sillytavern_extensions_termux.sh --auto-start-check [SillyTavern根目录] [用户目录名]
 #
+# JSON 命令模式（供本地 Web 面板调用）：
+#   ./update_sillytavern_extensions_termux.sh --json plugins-list [--st-root 路径] [--user-name 用户名]
+#   ./update_sillytavern_extensions_termux.sh --json status [--st-root 路径] [--user-name 用户名]
+#   ./update_sillytavern_extensions_termux.sh --json update-all [--st-root 路径] [--user-name 用户名]
+#   ./update_sillytavern_extensions_termux.sh --json update-selected --plugins name1,name2 [--st-root 路径] [--user-name 用户名]
+#   ./update_sillytavern_extensions_termux.sh --json delete --plugins name1,name2 [--st-root 路径] [--user-name 用户名]
+#   ./update_sillytavern_extensions_termux.sh --json whitelist-get
+#   ./update_sillytavern_extensions_termux.sh --json whitelist-add --plugins name1,name2
+#   ./update_sillytavern_extensions_termux.sh --json whitelist-remove --plugins name1,name2
+#   ./update_sillytavern_extensions_termux.sh --json settings-get
+#   ./update_sillytavern_extensions_termux.sh --json settings-save [--default-user-name 用户名] [--default-st-root 路径] [--auto-check-on-start 0|1]
+#
 # 环境变量同样可用：
 #   ST_ROOT=/path/to/SillyTavern ST_USER_NAME=default-user bash ./update_sillytavern_extensions_termux.sh
 
@@ -29,9 +41,24 @@ AUTO_START_BEGIN="# >>> sillytavern-extension-manager auto-start >>>"
 AUTO_START_END="# <<< sillytavern-extension-manager auto-start <<<"
 
 CONFIG_DEFAULT_USER_NAME="$FALLBACK_USER_NAME"
+CONFIG_DEFAULT_ST_ROOT=""
 AUTO_CHECK_ON_START=0
 ACTIVE_ST_ROOT=""
 ACTIVE_USER_NAME=""
+
+JSON_COMMAND=""
+JSON_ST_ROOT=""
+JSON_USER_NAME=""
+JSON_PLUGIN_NAMES_CSV=""
+JSON_DEFAULT_USER_NAME=""
+JSON_DEFAULT_ST_ROOT=""
+JSON_AUTO_CHECK_ON_START=""
+JSON_DEFAULT_USER_NAME_SET=0
+JSON_DEFAULT_ST_ROOT_SET=0
+JSON_AUTO_CHECK_ON_START_SET=0
+JSON_ERROR_CODE=""
+JSON_ERROR_MESSAGE=""
+JSON_ERROR_DETAILS=""
 
 checked_count=0
 updated_count=0
@@ -41,11 +68,44 @@ failed_count=0
 SKIPPED_DETAILS=()
 FAILED_DETAILS=()
 
+SUMMARY_TOTAL=0
+SUMMARY_UPDATABLE=0
+SUMMARY_UP_TO_DATE=0
+SUMMARY_SKIPPED=0
+SUMMARY_FAILED=0
+SUMMARY_STATUS_UPDATE_AVAILABLE=0
+SUMMARY_STATUS_UPDATED=0
+SUMMARY_STATUS_UP_TO_DATE=0
+SUMMARY_STATUS_WHITELIST_SKIPPED=0
+SUMMARY_STATUS_NON_GIT=0
+SUMMARY_STATUS_NO_UPSTREAM=0
+SUMMARY_STATUS_REMOTE_UNREACHABLE=0
+SUMMARY_STATUS_UPDATE_FAILED=0
+
 PLUGIN_NAMES=()
 PLUGIN_PATHS=()
 PLUGIN_SOURCES=()
+SELECTED_PLUGIN_NAMES=()
+SELECTED_PLUGIN_PATHS=()
+SELECTED_PLUGIN_SOURCES=()
 WHITELIST_ITEMS=()
 PARSED_ITEMS=()
+JSON_RESULT_ITEMS=()
+JSON_MISSING_ITEMS=()
+
+LAST_PLUGIN_NAME=""
+LAST_PLUGIN_SOURCE=""
+LAST_PLUGIN_PATH=""
+LAST_PLUGIN_STATUS=""
+LAST_PLUGIN_REASON=""
+LAST_PLUGIN_REMOTE_NAME=""
+LAST_PLUGIN_UPSTREAM_REF=""
+LAST_PLUGIN_LOCAL_AHEAD=0
+LAST_PLUGIN_REMOTE_AHEAD=0
+LAST_PLUGIN_WHITELISTED=0
+
+LAST_WHITELIST_ACTION_STATUS=""
+LAST_WHITELIST_ACTION_MESSAGE=""
 
 COLOR_RED=""
 COLOR_RESET=""
@@ -112,10 +172,19 @@ trim_trailing_slash() {
     printf '%s\n' "$path_value"
 }
 
+normalize_path_value() {
+    local path_value="$1"
+
+    path_value=$(expand_home_path "$path_value")
+    path_value=$(trim_trailing_slash "$path_value")
+    printf '%s\n' "$path_value"
+}
+
 ensure_data_files() {
     if [ ! -f "$CONFIG_FILE" ]; then
         {
             printf 'CONFIG_DEFAULT_USER_NAME=%q\n' "$CONFIG_DEFAULT_USER_NAME"
+            printf 'CONFIG_DEFAULT_ST_ROOT=%q\n' "$CONFIG_DEFAULT_ST_ROOT"
             printf 'AUTO_CHECK_ON_START=%q\n' "$AUTO_CHECK_ON_START"
         } > "$CONFIG_FILE"
     fi
@@ -127,6 +196,7 @@ ensure_data_files() {
 
 load_config() {
     CONFIG_DEFAULT_USER_NAME="$FALLBACK_USER_NAME"
+    CONFIG_DEFAULT_ST_ROOT=""
     AUTO_CHECK_ON_START=0
 
     ensure_data_files
@@ -154,6 +224,7 @@ save_config() {
 
     {
         printf 'CONFIG_DEFAULT_USER_NAME=%q\n' "$CONFIG_DEFAULT_USER_NAME"
+        printf 'CONFIG_DEFAULT_ST_ROOT=%q\n' "$CONFIG_DEFAULT_ST_ROOT"
         printf 'AUTO_CHECK_ON_START=%q\n' "$AUTO_CHECK_ON_START"
     } > "$CONFIG_FILE"
 }
@@ -163,6 +234,14 @@ get_effective_default_user_name() {
         printf '%s\n' "$CONFIG_DEFAULT_USER_NAME"
     else
         printf '%s\n' "$FALLBACK_USER_NAME"
+    fi
+}
+
+get_effective_default_st_root() {
+    if [ -n "$CONFIG_DEFAULT_ST_ROOT" ]; then
+        printf '%s\n' "$(normalize_path_value "$CONFIG_DEFAULT_ST_ROOT")"
+    else
+        printf '%s\n' "$DEFAULT_ST_ROOT"
     fi
 }
 
@@ -204,39 +283,95 @@ is_whitelisted() {
     grep -Fxq -- "$plugin_name" "$WHITELIST_FILE" 2>/dev/null
 }
 
-append_whitelist_name() {
+add_whitelist_name_result() {
     local plugin_name="$1"
 
+    LAST_WHITELIST_ACTION_STATUS=""
+    LAST_WHITELIST_ACTION_MESSAGE=""
+
     plugin_name=$(trim_spaces "$plugin_name")
-    [ -n "$plugin_name" ] || return 1
+    if [ -z "$plugin_name" ]; then
+        LAST_WHITELIST_ACTION_STATUS="invalid"
+        LAST_WHITELIST_ACTION_MESSAGE="插件文件夹名不能为空"
+        return 1
+    fi
 
     case "$plugin_name" in
         */*)
-            printf '[跳过] 白名单项不能包含 / ：%s\n' "$plugin_name"
+            LAST_WHITELIST_ACTION_STATUS="invalid"
+            LAST_WHITELIST_ACTION_MESSAGE="白名单项不能包含 /"
             return 1
             ;;
     esac
 
     if is_whitelisted "$plugin_name"; then
-        printf '[跳过] 白名单已存在：%s\n' "$plugin_name"
+        LAST_WHITELIST_ACTION_STATUS="exists"
+        LAST_WHITELIST_ACTION_MESSAGE="白名单已存在"
         return 0
     fi
 
-    printf '%s\n' "$plugin_name" >> "$WHITELIST_FILE"
-    printf '[已添加] %s\n' "$plugin_name"
+    if ! printf '%s\n' "$plugin_name" >> "$WHITELIST_FILE"; then
+        LAST_WHITELIST_ACTION_STATUS="write_failed"
+        LAST_WHITELIST_ACTION_MESSAGE="写入白名单失败"
+        return 1
+    fi
+
+    LAST_WHITELIST_ACTION_STATUS="added"
+    LAST_WHITELIST_ACTION_MESSAGE="已添加"
+    return 0
 }
 
-remove_whitelist_name() {
+append_whitelist_name() {
+    local plugin_name="$1"
+
+    add_whitelist_name_result "$plugin_name"
+
+    case "$LAST_WHITELIST_ACTION_STATUS" in
+        added)
+            printf '[已添加] %s\n' "$(trim_spaces "$plugin_name")"
+            return 0
+            ;;
+        exists)
+            printf '[跳过] 白名单已存在：%s\n' "$(trim_spaces "$plugin_name")"
+            return 0
+            ;;
+        invalid)
+            printf '[跳过] %s：%s\n' "$LAST_WHITELIST_ACTION_MESSAGE" "$(trim_spaces "$plugin_name")"
+            return 1
+            ;;
+        write_failed)
+            printf '[失败] %s：%s\n' "$LAST_WHITELIST_ACTION_MESSAGE" "$(trim_spaces "$plugin_name")"
+            return 1
+            ;;
+        *)
+            printf '[失败] 白名单处理失败：%s\n' "$(trim_spaces "$plugin_name")"
+            return 1
+            ;;
+    esac
+}
+
+remove_whitelist_name_result() {
     local target_name="$1"
     local temp_file="$WHITELIST_FILE.tmp.$$"
     local found=1
     local line=""
 
+    LAST_WHITELIST_ACTION_STATUS=""
+    LAST_WHITELIST_ACTION_MESSAGE=""
+
     target_name=$(trim_spaces "$target_name")
-    [ -n "$target_name" ] || return 1
+    if [ -z "$target_name" ]; then
+        LAST_WHITELIST_ACTION_STATUS="invalid"
+        LAST_WHITELIST_ACTION_MESSAGE="插件文件夹名不能为空"
+        return 1
+    fi
 
     ensure_data_files
-    : > "$temp_file" || return 1
+    : > "$temp_file" || {
+        LAST_WHITELIST_ACTION_STATUS="write_failed"
+        LAST_WHITELIST_ACTION_MESSAGE="无法创建临时文件"
+        return 1
+    }
 
     while IFS= read -r line || [ -n "$line" ]; do
         line=$(trim_spaces "$line")
@@ -250,8 +385,35 @@ remove_whitelist_name() {
         printf '%s\n' "$line" >> "$temp_file"
     done < "$WHITELIST_FILE"
 
-    mv "$temp_file" "$WHITELIST_FILE" || return 1
-    return "$found"
+    if ! mv "$temp_file" "$WHITELIST_FILE"; then
+        rm -f -- "$temp_file"
+        LAST_WHITELIST_ACTION_STATUS="write_failed"
+        LAST_WHITELIST_ACTION_MESSAGE="写回白名单失败"
+        return 1
+    fi
+
+    if [ "$found" -eq 0 ]; then
+        LAST_WHITELIST_ACTION_STATUS="removed"
+        LAST_WHITELIST_ACTION_MESSAGE="已移除"
+        return 0
+    fi
+
+    LAST_WHITELIST_ACTION_STATUS="not_found"
+    LAST_WHITELIST_ACTION_MESSAGE="白名单中不存在"
+    return 1
+}
+
+remove_whitelist_name() {
+    remove_whitelist_name_result "$1"
+
+    case "$LAST_WHITELIST_ACTION_STATUS" in
+        removed)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 split_csv_to_array() {
@@ -265,7 +427,9 @@ split_csv_to_array() {
     for item in "${raw_items[@]}"; do
         item=$(trim_spaces "$item")
         [ -n "$item" ] || continue
-        PARSED_ITEMS+=("$item")
+        if ! array_contains "$item" "${PARSED_ITEMS[@]}"; then
+            PARSED_ITEMS+=("$item")
+        fi
     done
 }
 
@@ -281,6 +445,241 @@ array_contains() {
     done
 
     return 1
+}
+
+json_escape() {
+    local value="$1"
+
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+
+    printf '%s' "$value"
+}
+
+json_quote() {
+    printf '"%s"' "$(json_escape "$1")"
+}
+
+json_bool() {
+    case "$1" in
+        1|true|TRUE|True)
+            printf 'true'
+            ;;
+        *)
+            printf 'false'
+            ;;
+    esac
+}
+
+json_null_or_string() {
+    if [ -n "$1" ]; then
+        json_quote "$1"
+    else
+        printf 'null'
+    fi
+}
+
+json_print_string_array() {
+    local array_name="$1"
+    local -n array_ref="$array_name"
+    local index=0
+
+    printf '['
+    for index in "${!array_ref[@]}"; do
+        if [ "$index" -gt 0 ]; then
+            printf ','
+        fi
+        json_quote "${array_ref[index]}"
+    done
+    printf ']'
+}
+
+json_print_raw_array() {
+    local array_name="$1"
+    local -n array_ref="$array_name"
+    local index=0
+
+    printf '['
+    for index in "${!array_ref[@]}"; do
+        if [ "$index" -gt 0 ]; then
+            printf ','
+        fi
+        printf '%s' "${array_ref[index]}"
+    done
+    printf ']'
+}
+
+emit_json_error() {
+    local command_name="$1"
+    local code="$2"
+    local message="$3"
+    local details="$4"
+
+    printf '{'
+    printf '"ok":false,'
+    printf '"command":%s,' "$(json_quote "$command_name")"
+    printf '"error":{'
+    printf '"code":%s,' "$(json_quote "$code")"
+    printf '"message":%s,' "$(json_quote "$message")"
+    printf '"details":%s' "$(json_null_or_string "$details")"
+    printf '}'
+    printf '}'
+    printf '\n'
+}
+
+emit_settings_json_object() {
+    printf '{'
+    printf '"default_user_name":%s,' "$(json_quote "$(get_effective_default_user_name)")"
+    printf '"default_st_root":%s,' "$(json_null_or_string "$CONFIG_DEFAULT_ST_ROOT")"
+    printf '"effective_default_st_root":%s,' "$(json_quote "$(get_effective_default_st_root)")"
+    printf '"auto_check_on_start":%s,' "$(json_bool "$AUTO_CHECK_ON_START")"
+    printf '"config_file":%s,' "$(json_quote "$CONFIG_FILE")"
+    printf '"whitelist_file":%s' "$(json_quote "$WHITELIST_FILE")"
+    printf '}'
+}
+
+emit_context_json_object() {
+    local third_party_dir=""
+    local user_extensions_dir=""
+
+    if [ -n "$ACTIVE_ST_ROOT" ] && [ -n "$ACTIVE_USER_NAME" ]; then
+        third_party_dir="$ACTIVE_ST_ROOT/public/scripts/extensions/third-party"
+        user_extensions_dir="$ACTIVE_ST_ROOT/data/$ACTIVE_USER_NAME/extensions"
+    fi
+
+    printf '{'
+    printf '"st_root":%s,' "$(json_null_or_string "$ACTIVE_ST_ROOT")"
+    printf '"user_name":%s,' "$(json_null_or_string "$ACTIVE_USER_NAME")"
+    printf '"third_party_dir":%s,' "$(json_null_or_string "$third_party_dir")"
+    printf '"user_extensions_dir":%s' "$(json_null_or_string "$user_extensions_dir")"
+    printf '}'
+}
+
+build_basic_plugin_json_item() {
+    local plugin_name="$1"
+    local plugin_path="$2"
+    local plugin_source="$3"
+    local whitelisted_flag=0
+
+    if is_whitelisted "$plugin_name"; then
+        whitelisted_flag=1
+    fi
+
+    printf '{'
+    printf '"name":%s,' "$(json_quote "$plugin_name")"
+    printf '"source":%s,' "$(json_quote "$plugin_source")"
+    printf '"path":%s,' "$(json_quote "$plugin_path")"
+    printf '"whitelisted":%s' "$(json_bool "$whitelisted_flag")"
+    printf '}'
+}
+
+build_last_plugin_json_item() {
+    printf '{'
+    printf '"name":%s,' "$(json_quote "$LAST_PLUGIN_NAME")"
+    printf '"source":%s,' "$(json_quote "$LAST_PLUGIN_SOURCE")"
+    printf '"path":%s,' "$(json_quote "$LAST_PLUGIN_PATH")"
+    printf '"whitelisted":%s,' "$(json_bool "$LAST_PLUGIN_WHITELISTED")"
+    printf '"status":%s,' "$(json_quote "$LAST_PLUGIN_STATUS")"
+    printf '"reason":%s,' "$(json_quote "$LAST_PLUGIN_REASON")"
+    printf '"remote":%s,' "$(json_null_or_string "$LAST_PLUGIN_REMOTE_NAME")"
+    printf '"upstream":%s,' "$(json_null_or_string "$LAST_PLUGIN_UPSTREAM_REF")"
+    printf '"local_ahead":%s,' "$LAST_PLUGIN_LOCAL_AHEAD"
+    printf '"remote_ahead":%s' "$LAST_PLUGIN_REMOTE_AHEAD"
+    printf '}'
+}
+
+reset_json_summary_counters() {
+    SUMMARY_TOTAL=0
+    SUMMARY_UPDATABLE=0
+    SUMMARY_UP_TO_DATE=0
+    SUMMARY_SKIPPED=0
+    SUMMARY_FAILED=0
+    SUMMARY_STATUS_UPDATE_AVAILABLE=0
+    SUMMARY_STATUS_UPDATED=0
+    SUMMARY_STATUS_UP_TO_DATE=0
+    SUMMARY_STATUS_WHITELIST_SKIPPED=0
+    SUMMARY_STATUS_NON_GIT=0
+    SUMMARY_STATUS_NO_UPSTREAM=0
+    SUMMARY_STATUS_REMOTE_UNREACHABLE=0
+    SUMMARY_STATUS_UPDATE_FAILED=0
+}
+
+add_json_summary_status() {
+    local status_value="$1"
+
+    SUMMARY_TOTAL=$((SUMMARY_TOTAL + 1))
+
+    case "$status_value" in
+        update_available)
+            SUMMARY_UPDATABLE=$((SUMMARY_UPDATABLE + 1))
+            SUMMARY_STATUS_UPDATE_AVAILABLE=$((SUMMARY_STATUS_UPDATE_AVAILABLE + 1))
+            ;;
+        updated)
+            SUMMARY_STATUS_UPDATED=$((SUMMARY_STATUS_UPDATED + 1))
+            ;;
+        up_to_date)
+            SUMMARY_UP_TO_DATE=$((SUMMARY_UP_TO_DATE + 1))
+            SUMMARY_STATUS_UP_TO_DATE=$((SUMMARY_STATUS_UP_TO_DATE + 1))
+            ;;
+        whitelist_skipped)
+            SUMMARY_SKIPPED=$((SUMMARY_SKIPPED + 1))
+            SUMMARY_STATUS_WHITELIST_SKIPPED=$((SUMMARY_STATUS_WHITELIST_SKIPPED + 1))
+            ;;
+        non_git)
+            SUMMARY_SKIPPED=$((SUMMARY_SKIPPED + 1))
+            SUMMARY_STATUS_NON_GIT=$((SUMMARY_STATUS_NON_GIT + 1))
+            ;;
+        no_upstream)
+            SUMMARY_SKIPPED=$((SUMMARY_SKIPPED + 1))
+            SUMMARY_STATUS_NO_UPSTREAM=$((SUMMARY_STATUS_NO_UPSTREAM + 1))
+            ;;
+        remote_unreachable)
+            SUMMARY_SKIPPED=$((SUMMARY_SKIPPED + 1))
+            SUMMARY_STATUS_REMOTE_UNREACHABLE=$((SUMMARY_STATUS_REMOTE_UNREACHABLE + 1))
+            ;;
+        update_failed)
+            SUMMARY_FAILED=$((SUMMARY_FAILED + 1))
+            SUMMARY_STATUS_UPDATE_FAILED=$((SUMMARY_STATUS_UPDATE_FAILED + 1))
+            ;;
+    esac
+}
+
+emit_status_summary_json_object() {
+    printf '{'
+    printf '"total":%s,' "$SUMMARY_TOTAL"
+    printf '"updatable":%s,' "$SUMMARY_UPDATABLE"
+    printf '"up_to_date":%s,' "$SUMMARY_UP_TO_DATE"
+    printf '"skipped":%s,' "$SUMMARY_SKIPPED"
+    printf '"failed":%s,' "$SUMMARY_FAILED"
+    printf '"by_status":{'
+    printf '"update_available":%s,' "$SUMMARY_STATUS_UPDATE_AVAILABLE"
+    printf '"updated":%s,' "$SUMMARY_STATUS_UPDATED"
+    printf '"up_to_date":%s,' "$SUMMARY_STATUS_UP_TO_DATE"
+    printf '"whitelist_skipped":%s,' "$SUMMARY_STATUS_WHITELIST_SKIPPED"
+    printf '"non_git":%s,' "$SUMMARY_STATUS_NON_GIT"
+    printf '"no_upstream":%s,' "$SUMMARY_STATUS_NO_UPSTREAM"
+    printf '"remote_unreachable":%s,' "$SUMMARY_STATUS_REMOTE_UNREACHABLE"
+    printf '"update_failed":%s' "$SUMMARY_STATUS_UPDATE_FAILED"
+    printf '}'
+    printf '}'
+}
+
+emit_update_summary_json_object() {
+    printf '{'
+    printf '"checked":%s,' "$checked_count"
+    printf '"updated":%s,' "$updated_count"
+    printf '"up_to_date":%s,' "$no_update_count"
+    printf '"skipped":%s,' "$skipped_count"
+    printf '"failed":%s,' "$failed_count"
+    printf '"skipped_details":'
+    json_print_string_array SKIPPED_DETAILS
+    printf ','
+    printf '"failed_details":'
+    json_print_string_array FAILED_DETAILS
+    printf '}'
 }
 
 is_sillytavern_root() {
@@ -377,18 +776,19 @@ detect_sillytavern_root() {
 prompt_for_st_root() {
     local manual_root=""
     local selected_root=""
+    local suggested_root=""
+
+    suggested_root=$(get_effective_default_st_root)
 
     while :; do
-        printf '未自动识别 SillyTavern 根目录，请输入路径（直接回车使用默认值：%s）：' "$DEFAULT_ST_ROOT" >&2
+        printf '未自动识别 SillyTavern 根目录，请输入路径（直接回车使用默认值：%s）：' "$suggested_root" >&2
         IFS= read -r manual_root
 
         if [ -z "$manual_root" ]; then
-            selected_root="$DEFAULT_ST_ROOT"
+            selected_root="$suggested_root"
         else
-            selected_root=$(expand_home_path "$manual_root")
+            selected_root=$(normalize_path_value "$manual_root")
         fi
-
-        selected_root=$(trim_trailing_slash "$selected_root")
 
         if is_sillytavern_root "$selected_root"; then
             printf '%s\n' "$selected_root"
@@ -417,6 +817,7 @@ prompt_for_user_name() {
 resolve_st_root_interactive() {
     local input_st_root="$1"
     local st_root=""
+    local configured_root=""
 
     ACTIVE_ST_ROOT=""
 
@@ -425,8 +826,7 @@ resolve_st_root_interactive() {
     fi
 
     if [ -n "$input_st_root" ]; then
-        st_root=$(expand_home_path "$input_st_root")
-        st_root=$(trim_trailing_slash "$st_root")
+        st_root=$(normalize_path_value "$input_st_root")
 
         if ! is_sillytavern_root "$st_root"; then
             printf '错误：指定的 SillyTavern 根目录无效：%s\n' "$st_root"
@@ -436,12 +836,22 @@ resolve_st_root_interactive() {
 
         printf '已使用指定的 SillyTavern 根目录：%s\n' "$st_root"
     else
-        st_root=$(detect_sillytavern_root)
-        if [ -n "$st_root" ]; then
-            printf '已自动识别 SillyTavern 根目录：%s\n' "$st_root"
-        else
-            st_root=$(prompt_for_st_root)
-            printf '已使用手动输入的 SillyTavern 根目录：%s\n' "$st_root"
+        if [ -n "$CONFIG_DEFAULT_ST_ROOT" ]; then
+            configured_root=$(get_effective_default_st_root)
+            if is_sillytavern_root "$configured_root"; then
+                st_root="$configured_root"
+                printf '已使用设置中的 SillyTavern 根目录：%s\n' "$st_root"
+            fi
+        fi
+
+        if [ -z "$st_root" ]; then
+            st_root=$(detect_sillytavern_root)
+            if [ -n "$st_root" ]; then
+                printf '已自动识别 SillyTavern 根目录：%s\n' "$st_root"
+            else
+                st_root=$(prompt_for_st_root)
+                printf '已使用手动输入的 SillyTavern 根目录：%s\n' "$st_root"
+            fi
         fi
     fi
 
@@ -452,6 +862,7 @@ resolve_st_root_interactive() {
 resolve_st_root_noninteractive() {
     local input_st_root="$1"
     local st_root=""
+    local configured_root=""
 
     ACTIVE_ST_ROOT=""
 
@@ -460,18 +871,72 @@ resolve_st_root_noninteractive() {
     fi
 
     if [ -n "$input_st_root" ]; then
-        st_root=$(expand_home_path "$input_st_root")
-        st_root=$(trim_trailing_slash "$st_root")
+        st_root=$(normalize_path_value "$input_st_root")
 
         if ! is_sillytavern_root "$st_root"; then
             printf '自动检测更新已跳过：指定的 SillyTavern 根目录无效：%s\n' "$st_root"
             return 1
         fi
     else
-        st_root=$(detect_sillytavern_root)
+        if [ -n "$CONFIG_DEFAULT_ST_ROOT" ]; then
+            configured_root=$(get_effective_default_st_root)
+            if is_sillytavern_root "$configured_root"; then
+                st_root="$configured_root"
+            fi
+        fi
+
         if [ -z "$st_root" ]; then
-            printf '自动检测更新已跳过：未自动识别到 SillyTavern 根目录。\n'
+            st_root=$(detect_sillytavern_root)
+            if [ -z "$st_root" ]; then
+                printf '自动检测更新已跳过：未自动识别到 SillyTavern 根目录。\n'
+                return 1
+            fi
+        fi
+    fi
+
+    ACTIVE_ST_ROOT="$st_root"
+    return 0
+}
+
+resolve_st_root_json() {
+    local input_st_root="$1"
+    local st_root=""
+    local configured_root=""
+
+    ACTIVE_ST_ROOT=""
+    JSON_ERROR_CODE=""
+    JSON_ERROR_MESSAGE=""
+    JSON_ERROR_DETAILS=""
+
+    if [ -z "$input_st_root" ] && [ -n "$ST_ROOT" ]; then
+        input_st_root="$ST_ROOT"
+    fi
+
+    if [ -n "$input_st_root" ]; then
+        st_root=$(normalize_path_value "$input_st_root")
+
+        if ! is_sillytavern_root "$st_root"; then
+            JSON_ERROR_CODE="invalid_root"
+            JSON_ERROR_MESSAGE="指定的 SillyTavern 根目录无效"
+            JSON_ERROR_DETAILS="$st_root"
             return 1
+        fi
+    else
+        if [ -n "$CONFIG_DEFAULT_ST_ROOT" ]; then
+            configured_root=$(get_effective_default_st_root)
+            if is_sillytavern_root "$configured_root"; then
+                st_root="$configured_root"
+            fi
+        fi
+
+        if [ -z "$st_root" ]; then
+            st_root=$(detect_sillytavern_root)
+            if [ -z "$st_root" ]; then
+                JSON_ERROR_CODE="root_not_found"
+                JSON_ERROR_MESSAGE="未识别到 SillyTavern 根目录"
+                JSON_ERROR_DETAILS=""
+                return 1
+            fi
         fi
     fi
 
@@ -527,6 +992,28 @@ resolve_user_name_noninteractive() {
     return 0
 }
 
+resolve_user_name_json() {
+    local input_user_name="$1"
+
+    ACTIVE_USER_NAME=""
+
+    if [ -z "$input_user_name" ] && [ -n "$ST_USER_NAME" ]; then
+        input_user_name="$ST_USER_NAME"
+    fi
+
+    if [ -n "$input_user_name" ]; then
+        ACTIVE_USER_NAME="$input_user_name"
+    else
+        ACTIVE_USER_NAME=$(get_effective_default_user_name)
+    fi
+
+    if [ -z "$ACTIVE_USER_NAME" ]; then
+        ACTIVE_USER_NAME="$FALLBACK_USER_NAME"
+    fi
+
+    return 0
+}
+
 prepare_context_interactive() {
     local input_st_root="$1"
     local input_user_name="$2"
@@ -542,6 +1029,15 @@ prepare_context_noninteractive() {
 
     resolve_st_root_noninteractive "$input_st_root" || return 1
     resolve_user_name_noninteractive "$input_user_name" || return 1
+    return 0
+}
+
+prepare_context_json() {
+    local input_st_root="$1"
+    local input_user_name="$2"
+
+    resolve_st_root_json "$input_st_root" || return 1
+    resolve_user_name_json "$input_user_name" || return 1
     return 0
 }
 
@@ -561,6 +1057,10 @@ require_git() {
     fi
 
     return 0
+}
+
+require_git_quiet() {
+    command -v git >/dev/null 2>&1
 }
 
 reset_update_stats() {
@@ -605,8 +1105,8 @@ summarize_command_error() {
         summary="未提供详细错误信息"
     fi
 
-    if [ "${#summary}" -gt 120 ]; then
-        summary="${summary:0:117}..."
+    if [ "${#summary}" -gt 160 ]; then
+        summary="${summary:0:157}..."
     fi
 
     printf '%s\n' "$summary"
@@ -700,11 +1200,81 @@ is_remote_access_issue() {
     return 1
 }
 
-process_plugin_update() {
+reset_last_plugin_result() {
+    LAST_PLUGIN_NAME=""
+    LAST_PLUGIN_SOURCE=""
+    LAST_PLUGIN_PATH=""
+    LAST_PLUGIN_STATUS=""
+    LAST_PLUGIN_REASON=""
+    LAST_PLUGIN_REMOTE_NAME=""
+    LAST_PLUGIN_UPSTREAM_REF=""
+    LAST_PLUGIN_LOCAL_AHEAD=0
+    LAST_PLUGIN_REMOTE_AHEAD=0
+    LAST_PLUGIN_WHITELISTED=0
+}
+
+print_plugin_state_verbose() {
+    local action_mode="$1"
+    local repo_name="$LAST_PLUGIN_NAME"
+
+    case "$LAST_PLUGIN_STATUS" in
+        whitelist_skipped)
+            printf '  -> [跳过] 命中白名单，已跳过更新检测\n\n'
+            ;;
+        non_git)
+            printf '  -> [跳过] 不是 Git 仓库\n\n'
+            ;;
+        no_upstream)
+            printf '  -> [跳过] Git 仓库未配置上游分支\n\n'
+            ;;
+        remote_unreachable)
+            printf '  -> [跳过] %s\n\n' "$LAST_PLUGIN_REASON"
+            ;;
+        up_to_date)
+            printf '  -> [无更新] %s\n\n' "$LAST_PLUGIN_REASON"
+            ;;
+        update_available)
+            printf '  -> [可更新] %s\n\n' "$LAST_PLUGIN_REASON"
+            ;;
+        updated)
+            printf '  -> [已更新] %s\n\n' "$LAST_PLUGIN_REASON"
+            ;;
+        update_failed)
+            printf '  -> [失败] %s\n\n' "$LAST_PLUGIN_REASON"
+            ;;
+        *)
+            printf '  -> [未知状态] %s：%s\n\n' "$repo_name" "$LAST_PLUGIN_REASON"
+            ;;
+    esac
+}
+
+record_update_summary_from_last_plugin() {
+    local repo_display_name="${LAST_PLUGIN_NAME}（${LAST_PLUGIN_SOURCE}）"
+
+    case "$LAST_PLUGIN_STATUS" in
+        updated)
+            updated_count=$((updated_count + 1))
+            ;;
+        up_to_date)
+            no_update_count=$((no_update_count + 1))
+            ;;
+        whitelist_skipped|non_git|no_upstream|remote_unreachable)
+            skipped_count=$((skipped_count + 1))
+            record_skipped_detail "$repo_display_name" "$LAST_PLUGIN_REASON"
+            ;;
+        update_failed)
+            failed_count=$((failed_count + 1))
+            record_failed_detail "$repo_display_name" "$LAST_PLUGIN_REASON"
+            ;;
+    esac
+}
+
+inspect_plugin_state() {
     local repo_dir="$1"
     local source_label="$2"
+    local action_mode="$3"
+    local verbose_mode="$4"
     local repo_name=""
-    local repo_display_name=""
     local upstream_ref=""
     local remote_name=""
     local remote_check_output=""
@@ -717,55 +1287,63 @@ process_plugin_update() {
     local pull_output=""
     local pull_status=0
 
+    reset_last_plugin_result
+
     repo_name=${repo_dir##*/}
-    repo_display_name="${repo_name}（${source_label}）"
+    LAST_PLUGIN_NAME="$repo_name"
+    LAST_PLUGIN_SOURCE="$source_label"
+    LAST_PLUGIN_PATH="$repo_dir"
     checked_count=$((checked_count + 1))
 
-    printf '[检查] %s\n' "$repo_name"
+    if [ "$verbose_mode" = "1" ]; then
+        printf '[检查] %s\n' "$repo_name"
+    fi
 
     if [ ! -d "$repo_dir" ]; then
-        skipped_count=$((skipped_count + 1))
-        record_skipped_detail "$repo_display_name" "目录不存在"
-        printf '  -> [跳过] 目录不存在\n\n'
+        LAST_PLUGIN_STATUS="update_failed"
+        LAST_PLUGIN_REASON="目录不存在"
+        [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
         return 0
     fi
 
     if is_whitelisted "$repo_name"; then
-        skipped_count=$((skipped_count + 1))
-        record_skipped_detail "$repo_display_name" "命中白名单"
-        printf '  -> [跳过] 命中白名单，已跳过更新检测\n\n'
+        LAST_PLUGIN_WHITELISTED=1
+        LAST_PLUGIN_STATUS="whitelist_skipped"
+        LAST_PLUGIN_REASON="命中白名单"
+        [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
         return 0
     fi
 
     if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        skipped_count=$((skipped_count + 1))
-        record_skipped_detail "$repo_display_name" "不是 Git 仓库"
-        printf '  -> [跳过] 不是 Git 仓库\n\n'
+        LAST_PLUGIN_STATUS="non_git"
+        LAST_PLUGIN_REASON="不是 Git 仓库"
+        [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
         return 0
     fi
 
     upstream_ref=$(git -C "$repo_dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
     if [ -z "$upstream_ref" ]; then
-        skipped_count=$((skipped_count + 1))
-        record_skipped_detail "$repo_display_name" "未配置上游分支"
-        printf '  -> [跳过] Git 仓库未配置上游分支\n\n'
+        LAST_PLUGIN_STATUS="no_upstream"
+        LAST_PLUGIN_REASON="未配置上游分支"
+        [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
         return 0
     fi
 
     remote_name=${upstream_ref%%/*}
+    LAST_PLUGIN_REMOTE_NAME="$remote_name"
+    LAST_PLUGIN_UPSTREAM_REF="$upstream_ref"
+
     remote_check_output=$(git_non_interactive -C "$repo_dir" ls-remote --quiet "$remote_name" HEAD 2>&1)
     remote_check_status=$?
     if [ "$remote_check_status" -ne 0 ]; then
         if is_remote_access_issue "$remote_check_output"; then
-            skipped_count=$((skipped_count + 1))
-            record_skipped_detail "$repo_display_name" "远程仓库不可访问（$(summarize_command_error "$remote_check_output")）"
-            printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
+            LAST_PLUGIN_STATUS="remote_unreachable"
+            LAST_PLUGIN_REASON="远程不可访问（$(summarize_command_error "$remote_check_output")）"
         else
-            failed_count=$((failed_count + 1))
-            record_failed_detail "$repo_display_name" "无法访问远程仓库（$(summarize_command_error "$remote_check_output")）"
-            printf '  -> [失败] 无法访问远程仓库\n'
+            LAST_PLUGIN_STATUS="update_failed"
+            LAST_PLUGIN_REASON="无法访问远程仓库（$(summarize_command_error "$remote_check_output")）"
         fi
-        printf '%s\n\n' "$remote_check_output"
+        [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
         return 0
     fi
 
@@ -773,61 +1351,70 @@ process_plugin_update() {
     fetch_status=$?
     if [ "$fetch_status" -ne 0 ]; then
         if is_remote_access_issue "$fetch_output"; then
-            skipped_count=$((skipped_count + 1))
-            record_skipped_detail "$repo_display_name" "远程仓库不可访问（$(summarize_command_error "$fetch_output")）"
-            printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
+            LAST_PLUGIN_STATUS="remote_unreachable"
+            LAST_PLUGIN_REASON="远程不可访问（$(summarize_command_error "$fetch_output")）"
         else
-            failed_count=$((failed_count + 1))
-            record_failed_detail "$repo_display_name" "fetch 失败（$(summarize_command_error "$fetch_output")）"
-            printf '  -> [失败] fetch 失败\n'
+            LAST_PLUGIN_STATUS="update_failed"
+            LAST_PLUGIN_REASON="fetch 失败（$(summarize_command_error "$fetch_output")）"
         fi
-        printf '%s\n\n' "$fetch_output"
+        [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
         return 0
     fi
 
     counts=$(git -C "$repo_dir" rev-list --left-right --count "HEAD...$upstream_ref" 2>/dev/null)
     if [ -z "$counts" ]; then
-        failed_count=$((failed_count + 1))
-        record_failed_detail "$repo_display_name" "无法比较本地与远程差异"
-        printf '  -> [失败] 无法比较本地与远程差异\n\n'
+        LAST_PLUGIN_STATUS="update_failed"
+        LAST_PLUGIN_REASON="无法比较本地与远程差异"
+        [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
         return 0
     fi
 
     set -- $counts
     local_ahead=$1
     remote_ahead=$2
+    LAST_PLUGIN_LOCAL_AHEAD=$local_ahead
+    LAST_PLUGIN_REMOTE_AHEAD=$remote_ahead
 
     if [ "$remote_ahead" -eq 0 ]; then
-        no_update_count=$((no_update_count + 1))
+        LAST_PLUGIN_STATUS="up_to_date"
         if [ "$local_ahead" -gt 0 ]; then
-            printf '  -> [无更新] 远程没有新提交（本地领先 %s 个提交）\n\n' "$local_ahead"
+            LAST_PLUGIN_REASON="远程没有新提交（本地领先 ${local_ahead} 个提交）"
         else
-            printf '  -> [无更新] 本地已是最新\n\n'
+            LAST_PLUGIN_REASON="本地已是最新"
         fi
+        [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
+        return 0
+    fi
+
+    if [ "$action_mode" = "status" ]; then
+        LAST_PLUGIN_STATUS="update_available"
+        LAST_PLUGIN_REASON="远程领先 ${remote_ahead} 个提交"
+        [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
         return 0
     fi
 
     pull_output=$(git_non_interactive -C "$repo_dir" pull --ff-only 2>&1)
     pull_status=$?
     if [ "$pull_status" -eq 0 ]; then
-        updated_count=$((updated_count + 1))
-        printf '  -> [已更新] 已拉取远程更新（远程领先 %s 个提交）\n' "$remote_ahead"
-        if [ -n "$pull_output" ]; then
-            printf '%s\n' "$pull_output"
-        fi
-        printf '\n'
+        LAST_PLUGIN_STATUS="updated"
+        LAST_PLUGIN_REASON="已拉取远程更新（远程领先 ${remote_ahead} 个提交）"
     else
         if is_remote_access_issue "$pull_output"; then
-            skipped_count=$((skipped_count + 1))
-            record_skipped_detail "$repo_display_name" "拉取时远程仓库不可访问（$(summarize_command_error "$pull_output")）"
-            printf '  -> [跳过] 拉取时远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
+            LAST_PLUGIN_STATUS="remote_unreachable"
+            LAST_PLUGIN_REASON="拉取时远程不可访问（$(summarize_command_error "$pull_output")）"
         else
-            failed_count=$((failed_count + 1))
-            record_failed_detail "$repo_display_name" "pull 失败（$(summarize_command_error "$pull_output")）"
-            printf '  -> [失败] pull 失败\n'
+            LAST_PLUGIN_STATUS="update_failed"
+            LAST_PLUGIN_REASON="pull 失败（$(summarize_command_error "$pull_output")）"
         fi
-        printf '%s\n\n' "$pull_output"
     fi
+
+    [ "$verbose_mode" = "1" ] && print_plugin_state_verbose "$action_mode"
+    return 0
+}
+
+process_plugin_update() {
+    inspect_plugin_state "$1" "$2" "update" "1"
+    record_update_summary_from_last_plugin
 }
 
 scan_extensions_dir() {
@@ -933,6 +1520,42 @@ collect_plugins() {
 
     collect_plugins_from_dir "$third_party_dir" "public"
     collect_plugins_from_dir "$user_extensions_dir" "user"
+}
+
+select_plugins_by_name_list() {
+    local raw_names_csv="$1"
+    local requested_name=""
+    local index=0
+    local found_for_name=0
+    local missing_name=""
+
+    SELECTED_PLUGIN_NAMES=()
+    SELECTED_PLUGIN_PATHS=()
+    SELECTED_PLUGIN_SOURCES=()
+    JSON_MISSING_ITEMS=()
+
+    split_csv_to_array "$raw_names_csv"
+    if [ "${#PARSED_ITEMS[@]}" -eq 0 ]; then
+        return 1
+    fi
+
+    for requested_name in "${PARSED_ITEMS[@]}"; do
+        found_for_name=0
+        for index in "${!PLUGIN_NAMES[@]}"; do
+            if [ "${PLUGIN_NAMES[index]}" = "$requested_name" ]; then
+                SELECTED_PLUGIN_NAMES+=("${PLUGIN_NAMES[index]}")
+                SELECTED_PLUGIN_PATHS+=("${PLUGIN_PATHS[index]}")
+                SELECTED_PLUGIN_SOURCES+=("${PLUGIN_SOURCES[index]}")
+                found_for_name=1
+            fi
+        done
+
+        if [ "$found_for_name" -eq 0 ]; then
+            JSON_MISSING_ITEMS+=("$requested_name")
+        fi
+    done
+
+    return 0
 }
 
 print_plugin_sources() {
@@ -1153,6 +1776,44 @@ set_default_user_name_workflow() {
     printf '已保存默认用户名：%s\n' "$CONFIG_DEFAULT_USER_NAME"
 }
 
+set_default_st_root_workflow() {
+    local current_default_st_root=""
+    local new_default_st_root=""
+    local normalized_root=""
+
+    current_default_st_root="$CONFIG_DEFAULT_ST_ROOT"
+
+    if [ -n "$current_default_st_root" ]; then
+        printf '当前默认根目录：%s\n' "$current_default_st_root"
+    else
+        printf '当前默认根目录：未设置（将自动检测）\n'
+    fi
+
+    printf '请输入新的 SillyTavern 根目录（输入 auto 或直接回车可清空设置并恢复自动检测）：'
+    IFS= read -r new_default_st_root
+
+    new_default_st_root=$(trim_spaces "$new_default_st_root")
+    case "$new_default_st_root" in
+        ""|auto|AUTO|Auto)
+            CONFIG_DEFAULT_ST_ROOT=""
+            save_config || return 1
+            printf '已清空默认根目录，将恢复自动检测。\n'
+            return 0
+            ;;
+    esac
+
+    normalized_root=$(normalize_path_value "$new_default_st_root")
+    if ! is_sillytavern_root "$normalized_root"; then
+        printf '输入的目录看起来不是 SillyTavern 根目录：%s\n' "$normalized_root"
+        printf '请确认该目录下能看到 public 和 data。\n'
+        return 1
+    fi
+
+    CONFIG_DEFAULT_ST_ROOT="$normalized_root"
+    save_config || return 1
+    printf '已保存默认根目录：%s\n' "$CONFIG_DEFAULT_ST_ROOT"
+}
+
 toggle_auto_check_on_start_workflow() {
     if [ "$AUTO_CHECK_ON_START" = "1" ]; then
         if is_termux_environment; then
@@ -1226,11 +1887,21 @@ whitelist_menu() {
                     printf '未输入有效的插件名。\n'
                 else
                     for item in "${PARSED_ITEMS[@]}"; do
-                        if remove_whitelist_name "$item"; then
-                            printf '[已移除] %s\n' "$item"
-                        else
-                            printf '[跳过] 白名单中不存在：%s\n' "$item"
-                        fi
+                        remove_whitelist_name_result "$item"
+                        case "$LAST_WHITELIST_ACTION_STATUS" in
+                            removed)
+                                printf '[已移除] %s\n' "$item"
+                                ;;
+                            not_found)
+                                printf '[跳过] 白名单中不存在：%s\n' "$item"
+                                ;;
+                            invalid)
+                                printf '[跳过] %s：%s\n' "$LAST_WHITELIST_ACTION_MESSAGE" "$item"
+                                ;;
+                            *)
+                                printf '[失败] %s：%s\n' "$LAST_WHITELIST_ACTION_MESSAGE" "$item"
+                                ;;
+                        esac
                     done
                 fi
                 press_enter_to_continue
@@ -1356,6 +2027,7 @@ delete_plugins_workflow() {
 settings_menu() {
     local menu_choice=""
     local auto_status=""
+    local root_status=""
 
     while :; do
         if [ "$AUTO_CHECK_ON_START" = "1" ]; then
@@ -1364,9 +2036,16 @@ settings_menu() {
             auto_status='已关闭'
         fi
 
+        if [ -n "$CONFIG_DEFAULT_ST_ROOT" ]; then
+            root_status="$CONFIG_DEFAULT_ST_ROOT"
+        else
+            root_status='未设置（自动检测）'
+        fi
+
         printf '\n==== 设置 ====\n'
         printf '1. 默认用户名：%s\n' "$(get_effective_default_user_name)"
-        printf '2. 打开 Termux 时自动检测更新：%s\n' "$auto_status"
+        printf '2. 默认 SillyTavern 根目录：%s\n' "$root_status"
+        printf '3. 打开 Termux 时自动检测更新：%s\n' "$auto_status"
         printf '0. 返回\n'
         printf '请选择：'
         IFS= read -r menu_choice
@@ -1377,6 +2056,10 @@ settings_menu() {
                 press_enter_to_continue
                 ;;
             2)
+                set_default_st_root_workflow || printf '保存默认根目录失败。\n'
+                press_enter_to_continue
+                ;;
+            3)
                 toggle_auto_check_on_start_workflow || printf '切换自动检测更新失败。\n'
                 press_enter_to_continue
                 ;;
@@ -1391,16 +2074,563 @@ settings_menu() {
     done
 }
 
+json_plugins_list_command() {
+    local index=0
+
+    if ! prepare_context_json "$JSON_ST_ROOT" "$JSON_USER_NAME"; then
+        emit_json_error "$JSON_COMMAND" "$JSON_ERROR_CODE" "$JSON_ERROR_MESSAGE" "$JSON_ERROR_DETAILS"
+        return 1
+    fi
+
+    collect_plugins "$ACTIVE_ST_ROOT" "$ACTIVE_USER_NAME"
+
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"context":'
+    emit_context_json_object
+    printf ','
+    printf '"plugins":['
+    for index in "${!PLUGIN_NAMES[@]}"; do
+        if [ "$index" -gt 0 ]; then
+            printf ','
+        fi
+        build_basic_plugin_json_item "${PLUGIN_NAMES[index]}" "${PLUGIN_PATHS[index]}" "${PLUGIN_SOURCES[index]}"
+    done
+    printf ']'
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+json_status_command() {
+    local index=0
+
+    if ! require_git_quiet; then
+        emit_json_error "$JSON_COMMAND" "git_missing" "未检测到 git" "请先安装 git"
+        return 1
+    fi
+
+    if ! prepare_context_json "$JSON_ST_ROOT" "$JSON_USER_NAME"; then
+        emit_json_error "$JSON_COMMAND" "$JSON_ERROR_CODE" "$JSON_ERROR_MESSAGE" "$JSON_ERROR_DETAILS"
+        return 1
+    fi
+
+    collect_plugins "$ACTIVE_ST_ROOT" "$ACTIVE_USER_NAME"
+    reset_update_stats
+    reset_json_summary_counters
+    JSON_RESULT_ITEMS=()
+
+    for index in "${!PLUGIN_NAMES[@]}"; do
+        inspect_plugin_state "${PLUGIN_PATHS[index]}" "${PLUGIN_SOURCES[index]}" "status" "0"
+        add_json_summary_status "$LAST_PLUGIN_STATUS"
+        JSON_RESULT_ITEMS+=("$(build_last_plugin_json_item)")
+    done
+
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"context":'
+    emit_context_json_object
+    printf ','
+    printf '"summary":'
+    emit_status_summary_json_object
+    printf ','
+    printf '"plugins":'
+    json_print_raw_array JSON_RESULT_ITEMS
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+json_update_all_command() {
+    local index=0
+
+    if ! require_git_quiet; then
+        emit_json_error "$JSON_COMMAND" "git_missing" "未检测到 git" "请先安装 git"
+        return 1
+    fi
+
+    if ! prepare_context_json "$JSON_ST_ROOT" "$JSON_USER_NAME"; then
+        emit_json_error "$JSON_COMMAND" "$JSON_ERROR_CODE" "$JSON_ERROR_MESSAGE" "$JSON_ERROR_DETAILS"
+        return 1
+    fi
+
+    collect_plugins "$ACTIVE_ST_ROOT" "$ACTIVE_USER_NAME"
+    reset_update_stats
+    reset_json_summary_counters
+    JSON_RESULT_ITEMS=()
+
+    for index in "${!PLUGIN_NAMES[@]}"; do
+        inspect_plugin_state "${PLUGIN_PATHS[index]}" "${PLUGIN_SOURCES[index]}" "update" "0"
+        record_update_summary_from_last_plugin
+        add_json_summary_status "$LAST_PLUGIN_STATUS"
+        JSON_RESULT_ITEMS+=("$(build_last_plugin_json_item)")
+    done
+
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"context":'
+    emit_context_json_object
+    printf ','
+    printf '"summary":'
+    emit_update_summary_json_object
+    printf ','
+    printf '"status_overview":'
+    emit_status_summary_json_object
+    printf ','
+    printf '"results":'
+    json_print_raw_array JSON_RESULT_ITEMS
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+json_update_selected_command() {
+    local index=0
+
+    if [ -z "$JSON_PLUGIN_NAMES_CSV" ]; then
+        emit_json_error "$JSON_COMMAND" "missing_plugins" "缺少 --plugins 参数" "请传入逗号分隔的插件目录名"
+        return 1
+    fi
+
+    if ! require_git_quiet; then
+        emit_json_error "$JSON_COMMAND" "git_missing" "未检测到 git" "请先安装 git"
+        return 1
+    fi
+
+    if ! prepare_context_json "$JSON_ST_ROOT" "$JSON_USER_NAME"; then
+        emit_json_error "$JSON_COMMAND" "$JSON_ERROR_CODE" "$JSON_ERROR_MESSAGE" "$JSON_ERROR_DETAILS"
+        return 1
+    fi
+
+    collect_plugins "$ACTIVE_ST_ROOT" "$ACTIVE_USER_NAME"
+    if ! select_plugins_by_name_list "$JSON_PLUGIN_NAMES_CSV"; then
+        emit_json_error "$JSON_COMMAND" "invalid_plugins" "未传入有效的插件目录名" "$JSON_PLUGIN_NAMES_CSV"
+        return 1
+    fi
+
+    reset_update_stats
+    reset_json_summary_counters
+    JSON_RESULT_ITEMS=()
+
+    for index in "${!SELECTED_PLUGIN_NAMES[@]}"; do
+        inspect_plugin_state "${SELECTED_PLUGIN_PATHS[index]}" "${SELECTED_PLUGIN_SOURCES[index]}" "update" "0"
+        record_update_summary_from_last_plugin
+        add_json_summary_status "$LAST_PLUGIN_STATUS"
+        JSON_RESULT_ITEMS+=("$(build_last_plugin_json_item)")
+    done
+
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"context":'
+    emit_context_json_object
+    printf ','
+    printf '"requested_plugins":'
+    json_print_string_array PARSED_ITEMS
+    printf ','
+    printf '"missing_plugins":'
+    json_print_string_array JSON_MISSING_ITEMS
+    printf ','
+    printf '"summary":'
+    emit_update_summary_json_object
+    printf ','
+    printf '"status_overview":'
+    emit_status_summary_json_object
+    printf ','
+    printf '"results":'
+    json_print_raw_array JSON_RESULT_ITEMS
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+json_whitelist_get_command() {
+    read_whitelist_items
+
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"items":'
+    json_print_string_array WHITELIST_ITEMS
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+json_whitelist_add_command() {
+    local item=""
+    local result_items=()
+
+    if [ -z "$JSON_PLUGIN_NAMES_CSV" ]; then
+        emit_json_error "$JSON_COMMAND" "missing_plugins" "缺少 --plugins 参数" "请传入逗号分隔的插件目录名"
+        return 1
+    fi
+
+    split_csv_to_array "$JSON_PLUGIN_NAMES_CSV"
+    if [ "${#PARSED_ITEMS[@]}" -eq 0 ]; then
+        emit_json_error "$JSON_COMMAND" "invalid_plugins" "未传入有效的插件目录名" "$JSON_PLUGIN_NAMES_CSV"
+        return 1
+    fi
+
+    result_items=()
+    for item in "${PARSED_ITEMS[@]}"; do
+        add_whitelist_name_result "$item"
+        result_items+=("{\"name\":$(json_quote "$item"),\"status\":$(json_quote "$LAST_WHITELIST_ACTION_STATUS"),\"message\":$(json_quote "$LAST_WHITELIST_ACTION_MESSAGE")}")
+    done
+
+    read_whitelist_items
+
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"results":'
+    json_print_raw_array result_items
+    printf ','
+    printf '"items":'
+    json_print_string_array WHITELIST_ITEMS
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+json_whitelist_remove_command() {
+    local item=""
+    local result_items=()
+
+    if [ -z "$JSON_PLUGIN_NAMES_CSV" ]; then
+        emit_json_error "$JSON_COMMAND" "missing_plugins" "缺少 --plugins 参数" "请传入逗号分隔的插件目录名"
+        return 1
+    fi
+
+    split_csv_to_array "$JSON_PLUGIN_NAMES_CSV"
+    if [ "${#PARSED_ITEMS[@]}" -eq 0 ]; then
+        emit_json_error "$JSON_COMMAND" "invalid_plugins" "未传入有效的插件目录名" "$JSON_PLUGIN_NAMES_CSV"
+        return 1
+    fi
+
+    result_items=()
+    for item in "${PARSED_ITEMS[@]}"; do
+        remove_whitelist_name_result "$item"
+        result_items+=("{\"name\":$(json_quote "$item"),\"status\":$(json_quote "$LAST_WHITELIST_ACTION_STATUS"),\"message\":$(json_quote "$LAST_WHITELIST_ACTION_MESSAGE")}")
+    done
+
+    read_whitelist_items
+
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"results":'
+    json_print_raw_array result_items
+    printf ','
+    printf '"items":'
+    json_print_string_array WHITELIST_ITEMS
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+json_settings_get_command() {
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"settings":'
+    emit_settings_json_object
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+json_settings_save_command() {
+    local normalized_root=""
+    local shell_updated=0
+
+    if [ "$JSON_DEFAULT_USER_NAME_SET" = "1" ]; then
+        JSON_DEFAULT_USER_NAME=$(trim_spaces "$JSON_DEFAULT_USER_NAME")
+        if [ -z "$JSON_DEFAULT_USER_NAME" ]; then
+            CONFIG_DEFAULT_USER_NAME="$FALLBACK_USER_NAME"
+        else
+            CONFIG_DEFAULT_USER_NAME="$JSON_DEFAULT_USER_NAME"
+        fi
+    fi
+
+    if [ "$JSON_DEFAULT_ST_ROOT_SET" = "1" ]; then
+        JSON_DEFAULT_ST_ROOT=$(trim_spaces "$JSON_DEFAULT_ST_ROOT")
+        if [ -z "$JSON_DEFAULT_ST_ROOT" ]; then
+            CONFIG_DEFAULT_ST_ROOT=""
+        else
+            normalized_root=$(normalize_path_value "$JSON_DEFAULT_ST_ROOT")
+            if ! is_sillytavern_root "$normalized_root"; then
+                emit_json_error "$JSON_COMMAND" "invalid_root" "指定的 SillyTavern 根目录无效" "$normalized_root"
+                return 1
+            fi
+            CONFIG_DEFAULT_ST_ROOT="$normalized_root"
+        fi
+    fi
+
+    if [ "$JSON_AUTO_CHECK_ON_START_SET" = "1" ]; then
+        case "$JSON_AUTO_CHECK_ON_START" in
+            0|1)
+                ;;
+            *)
+                emit_json_error "$JSON_COMMAND" "invalid_auto_check" "--auto-check-on-start 只能是 0 或 1" "$JSON_AUTO_CHECK_ON_START"
+                return 1
+                ;;
+        esac
+
+        if [ "$JSON_AUTO_CHECK_ON_START" = "1" ] && [ "$AUTO_CHECK_ON_START" != "1" ]; then
+            if is_termux_environment; then
+                enable_autostart_in_shell_files || {
+                    emit_json_error "$JSON_COMMAND" "autostart_enable_failed" "开启自动检测更新失败" "无法写入 shell 启动文件"
+                    return 1
+                }
+                shell_updated=1
+            fi
+            AUTO_CHECK_ON_START=1
+        fi
+
+        if [ "$JSON_AUTO_CHECK_ON_START" = "0" ] && [ "$AUTO_CHECK_ON_START" != "0" ]; then
+            if is_termux_environment; then
+                disable_autostart_in_shell_files || {
+                    emit_json_error "$JSON_COMMAND" "autostart_disable_failed" "关闭自动检测更新失败" "无法修改 shell 启动文件"
+                    return 1
+                }
+                shell_updated=1
+            fi
+            AUTO_CHECK_ON_START=0
+        fi
+    fi
+
+    save_config || {
+        emit_json_error "$JSON_COMMAND" "save_config_failed" "保存设置失败" "$CONFIG_FILE"
+        return 1
+    }
+
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"shell_updated":%s,' "$(json_bool "$shell_updated")"
+    printf '"termux_environment":%s,' "$(json_bool "$(is_termux_environment && printf 1 || printf 0)")"
+    printf '"settings":'
+    emit_settings_json_object
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+json_delete_command() {
+    local index=0
+    local result_items=()
+    local delete_path=""
+    local delete_name=""
+    local delete_source=""
+    local deleted_count=0
+    local delete_failed_local=0
+    local delete_skipped_local=0
+
+    if [ -z "$JSON_PLUGIN_NAMES_CSV" ]; then
+        emit_json_error "$JSON_COMMAND" "missing_plugins" "缺少 --plugins 参数" "请传入逗号分隔的插件目录名"
+        return 1
+    fi
+
+    if ! prepare_context_json "$JSON_ST_ROOT" "$JSON_USER_NAME"; then
+        emit_json_error "$JSON_COMMAND" "$JSON_ERROR_CODE" "$JSON_ERROR_MESSAGE" "$JSON_ERROR_DETAILS"
+        return 1
+    fi
+
+    collect_plugins "$ACTIVE_ST_ROOT" "$ACTIVE_USER_NAME"
+    if ! select_plugins_by_name_list "$JSON_PLUGIN_NAMES_CSV"; then
+        emit_json_error "$JSON_COMMAND" "invalid_plugins" "未传入有效的插件目录名" "$JSON_PLUGIN_NAMES_CSV"
+        return 1
+    fi
+
+    result_items=()
+    for index in "${!SELECTED_PLUGIN_NAMES[@]}"; do
+        delete_name="${SELECTED_PLUGIN_NAMES[index]}"
+        delete_path="${SELECTED_PLUGIN_PATHS[index]}"
+        delete_source="${SELECTED_PLUGIN_SOURCES[index]}"
+
+        if [ ! -e "$delete_path" ]; then
+            delete_skipped_local=$((delete_skipped_local + 1))
+            result_items+=("{\"name\":$(json_quote "$delete_name"),\"source\":$(json_quote "$delete_source"),\"path\":$(json_quote "$delete_path"),\"status\":\"not_found\",\"reason\":\"目录不存在\"}")
+            continue
+        fi
+
+        rm -rf -- "$delete_path"
+        if [ -e "$delete_path" ]; then
+            delete_failed_local=$((delete_failed_local + 1))
+            result_items+=("{\"name\":$(json_quote "$delete_name"),\"source\":$(json_quote "$delete_source"),\"path\":$(json_quote "$delete_path"),\"status\":\"delete_failed\",\"reason\":\"删除失败\"}")
+        else
+            deleted_count=$((deleted_count + 1))
+            result_items+=("{\"name\":$(json_quote "$delete_name"),\"source\":$(json_quote "$delete_source"),\"path\":$(json_quote "$delete_path"),\"status\":\"deleted\",\"reason\":\"已删除\"}")
+        fi
+    done
+
+    printf '{'
+    printf '"ok":true,'
+    printf '"command":%s,' "$(json_quote "$JSON_COMMAND")"
+    printf '"context":'
+    emit_context_json_object
+    printf ','
+    printf '"requested_plugins":'
+    json_print_string_array PARSED_ITEMS
+    printf ','
+    printf '"missing_plugins":'
+    json_print_string_array JSON_MISSING_ITEMS
+    printf ','
+    printf '"summary":{'
+    printf '"deleted":%s,' "$deleted_count"
+    printf '"failed":%s,' "$delete_failed_local"
+    printf '"skipped":%s' "$delete_skipped_local"
+    printf '},'
+    printf '"results":'
+    json_print_raw_array result_items
+    printf '}'
+    printf '\n'
+    return 0
+}
+
+run_json_command() {
+    case "$JSON_COMMAND" in
+        plugins-list)
+            json_plugins_list_command
+            ;;
+        status|overview)
+            json_status_command
+            ;;
+        update-all)
+            json_update_all_command
+            ;;
+        update-selected)
+            json_update_selected_command
+            ;;
+        whitelist-get)
+            json_whitelist_get_command
+            ;;
+        whitelist-add)
+            json_whitelist_add_command
+            ;;
+        whitelist-remove)
+            json_whitelist_remove_command
+            ;;
+        settings-get)
+            json_settings_get_command
+            ;;
+        settings-save)
+            json_settings_save_command
+            ;;
+        delete)
+            json_delete_command
+            ;;
+        *)
+            emit_json_error "$JSON_COMMAND" "unknown_command" "未知 JSON 命令" "$JSON_COMMAND"
+            return 1
+            ;;
+    esac
+}
+
+parse_json_mode() {
+    shift
+
+    if [ "$#" -eq 0 ]; then
+        emit_json_error "" "missing_command" "缺少 JSON 命令" "请在 --json 后指定命令名"
+        return 1
+    fi
+
+    JSON_COMMAND="$1"
+    shift
+
+    JSON_ST_ROOT=""
+    JSON_USER_NAME=""
+    JSON_PLUGIN_NAMES_CSV=""
+    JSON_DEFAULT_USER_NAME=""
+    JSON_DEFAULT_ST_ROOT=""
+    JSON_AUTO_CHECK_ON_START=""
+    JSON_DEFAULT_USER_NAME_SET=0
+    JSON_DEFAULT_ST_ROOT_SET=0
+    JSON_AUTO_CHECK_ON_START_SET=0
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --st-root)
+                if [ "$#" -lt 2 ]; then
+                    emit_json_error "$JSON_COMMAND" "missing_argument" "--st-root 缺少参数值" ""
+                    return 1
+                fi
+                JSON_ST_ROOT="$2"
+                shift 2
+                ;;
+            --user-name)
+                if [ "$#" -lt 2 ]; then
+                    emit_json_error "$JSON_COMMAND" "missing_argument" "--user-name 缺少参数值" ""
+                    return 1
+                fi
+                JSON_USER_NAME="$2"
+                shift 2
+                ;;
+            --plugins)
+                if [ "$#" -lt 2 ]; then
+                    emit_json_error "$JSON_COMMAND" "missing_argument" "--plugins 缺少参数值" ""
+                    return 1
+                fi
+                JSON_PLUGIN_NAMES_CSV="$2"
+                shift 2
+                ;;
+            --default-user-name)
+                if [ "$#" -lt 2 ]; then
+                    emit_json_error "$JSON_COMMAND" "missing_argument" "--default-user-name 缺少参数值" ""
+                    return 1
+                fi
+                JSON_DEFAULT_USER_NAME="$2"
+                JSON_DEFAULT_USER_NAME_SET=1
+                shift 2
+                ;;
+            --default-st-root)
+                if [ "$#" -lt 2 ]; then
+                    emit_json_error "$JSON_COMMAND" "missing_argument" "--default-st-root 缺少参数值" ""
+                    return 1
+                fi
+                JSON_DEFAULT_ST_ROOT="$2"
+                JSON_DEFAULT_ST_ROOT_SET=1
+                shift 2
+                ;;
+            --auto-check-on-start)
+                if [ "$#" -lt 2 ]; then
+                    emit_json_error "$JSON_COMMAND" "missing_argument" "--auto-check-on-start 缺少参数值" ""
+                    return 1
+                fi
+                JSON_AUTO_CHECK_ON_START="$2"
+                JSON_AUTO_CHECK_ON_START_SET=1
+                shift 2
+                ;;
+            *)
+                emit_json_error "$JSON_COMMAND" "unknown_argument" "未知参数" "$1"
+                return 1
+                ;;
+        esac
+    done
+
+    run_json_command
+}
+
 print_help() {
     printf '用法：\n'
     printf '  bash %s                # 打开交互式管理面板\n' "$SCRIPT_NAME"
     printf '  bash %s <根目录> <用户名>\n' "$SCRIPT_NAME"
     printf '  bash %s --run-update [根目录] [用户名]\n' "$SCRIPT_NAME"
     printf '  bash %s --auto-start-check [根目录] [用户名]\n' "$SCRIPT_NAME"
+    printf '  bash %s --json <命令> [参数]\n' "$SCRIPT_NAME"
+    printf '\nJSON 命令：\n'
+    printf '  plugins-list / status / update-all / update-selected\n'
+    printf '  whitelist-get / whitelist-add / whitelist-remove\n'
+    printf '  settings-get / settings-save / delete\n'
     printf '\n说明：\n'
-    printf '  - 脚本现在依赖 bash 运行。\n'
+    printf '  - 脚本依赖 bash 运行。\n'
     printf '  - Termux 和电脑上的 Git Bash / WSL 都可使用。\n'
     printf '  - “打开 Termux 时自动检测更新”只在 Termux 下生效。\n'
+    printf '  - Web 面板请通过 JSON 命令模式调用，不要解析终端文案。\n'
 }
 
 main_menu() {
@@ -1468,6 +2698,9 @@ case "$1" in
     --run-update)
         shift
         run_update_flow 1 "$1" "$2"
+        ;;
+    --json)
+        parse_json_mode "$@"
         ;;
     "")
         main_menu

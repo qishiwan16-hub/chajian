@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>SillyTavern 扩展本地面板</title>
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <div class="app-shell">
+        <header class="hero card">
+            <div class="hero-text">
+                <p class="eyebrow">SillyTavern Extension Manager</p>
+                <h1>本地网页面板</h1>
+                <p class="hero-desc">保留原 Bash 管理能力，同时提供手机端更直观的插件查看、筛选、更新、白名单、删除和设置入口。</p>
+            </div>
+            <div class="hero-actions">
+                <button id="refresh-button" class="button button-secondary" type="button">刷新面板</button>
+                <button id="update-all-button" class="button" type="button">一键更新全部</button>
+            </div>
+            <div id="context-bar" class="context-bar"></div>
+        </header>
+
+        <section class="summary-grid" aria-label="总览统计">
+            <article class="summary-card card">
+                <span class="summary-label">插件总数</span>
+                <strong id="summary-total" class="summary-value">-</strong>
+            </article>
+            <article class="summary-card card accent-warning">
+                <span class="summary-label">可更新</span>
+                <strong id="summary-updatable" class="summary-value">-</strong>
+            </article>
+            <article class="summary-card card accent-success">
+                <span class="summary-label">已最新</span>
+                <strong id="summary-up-to-date" class="summary-value">-</strong>
+            </article>
+            <article class="summary-card card accent-muted">
+                <span class="summary-label">跳过</span>
+                <strong id="summary-skipped" class="summary-value">-</strong>
+            </article>
+            <article class="summary-card card accent-danger">
+                <span class="summary-label">失败</span>
+                <strong id="summary-failed" class="summary-value">-</strong>
+            </article>
+        </section>
+
+        <section class="panel-section card">
+            <div class="section-heading">
+                <div>
+                    <h2>筛选与批量操作</h2>
+                    <p>按名称、状态、来源快速缩小列表，再批量更新选中的插件。</p>
+                </div>
+                <span id="selection-count" class="selection-count">已选 0 项</span>
+            </div>
+
+            <div class="filters-grid">
+                <label class="field">
+                    <span>名称搜索</span>
+                    <input id="search-input" type="search" placeholder="搜索友好名或目录名">
+                </label>
+                <label class="field">
+                    <span>状态筛选</span>
+                    <select id="status-filter"></select>
+                </label>
+                <label class="field">
+                    <span>来源筛选</span>
+                    <select id="source-filter"></select>
+                </label>
+            </div>
+
+            <div class="action-row">
+                <button id="select-visible-button" class="button button-secondary" type="button">选中当前筛选结果</button>
+                <button id="clear-selection-button" class="button button-ghost" type="button">清空选择</button>
+                <button id="batch-update-button" class="button" type="button">更新已选插件</button>
+            </div>
+        </section>
+
+        <section class="panel-section card">
+            <div class="section-heading">
+                <div>
+                    <h2>插件列表</h2>
+                    <p>界面优先展示友好名，同时保留真实目录名作为内部唯一标识。</p>
+                </div>
+                <span id="plugin-count-label" class="muted-text">共 0 项</span>
+            </div>
+            <div id="plugin-list" class="plugin-list" aria-live="polite"></div>
+            <div id="empty-state" class="empty-state hidden">当前没有可显示的插件。</div>
+        </section>
+
+        <section class="dual-section">
+            <section class="panel-section card">
+                <div class="section-heading">
+                    <div>
+                        <h2>白名单</h2>
+                        <p>白名单按插件目录名匹配。命中后更新检测会被跳过。</p>
+                    </div>
+                    <span id="whitelist-count" class="muted-text">0 项</span>
+                </div>
+                <div id="whitelist-tags" class="tag-list"></div>
+            </section>
+
+            <section class="panel-section card">
+                <div class="section-heading">
+                    <div>
+                        <h2>设置</h2>
+                        <p>至少支持默认用户名、SillyTavern 根目录、自动检测更新开关。</p>
+                    </div>
+                </div>
+                <form id="settings-form" class="settings-form">
+                    <label class="field">
+                        <span>默认用户名</span>
+                        <input id="setting-default-user-name" name="default_user_name" type="text" placeholder="default-user">
+                    </label>
+                    <label class="field">
+                        <span>SillyTavern 根目录</span>
+                        <input id="setting-default-st-root" name="default_st_root" type="text" placeholder="留空时自动检测">
+                    </label>
+                    <label class="checkbox-field">
+                        <input id="setting-auto-check" name="auto_check_on_start" type="checkbox">
+                        <span>打开 Termux 时自动检测更新</span>
+                    </label>
+                    <div class="action-row compact">
+                        <button id="save-settings-button" class="button" type="submit">保存设置</button>
+                    </div>
+                </form>
+            </section>
+        </section>
+
+        <section class="panel-section card">
+            <div class="section-heading">
+                <div>
+                    <h2>操作结果</h2>
+                    <p>显示最近一次更新、白名单、删除或设置操作的结果摘要。</p>
+                </div>
+            </div>
+            <div id="result-panel" class="result-panel muted-text">尚未执行操作。</div>
+        </section>
+    </div>
+
+    <template id="plugin-card-template">
+        <article class="plugin-card">
+            <label class="plugin-select">
+                <input class="plugin-checkbox" type="checkbox">
+                <span>选择</span>
+            </label>
+            <div class="plugin-main">
+                <div class="plugin-title-row">
+                    <div>
+                        <h3 class="plugin-title"></h3>
+                        <p class="plugin-directory"></p>
+                    </div>
+                    <span class="status-badge"></span>
+                </div>
+                <div class="meta-row">
+                    <span class="meta-chip source-chip"></span>
+                    <span class="meta-chip name-source-chip"></span>
+                    <span class="meta-chip whitelist-chip hidden">白名单</span>
+                </div>
+                <p class="plugin-reason"></p>
+                <div class="plugin-actions action-row compact">
+                    <button class="button button-secondary action-single-update" type="button">单独更新</button>
+                    <button class="button button-ghost action-whitelist" type="button"></button>
+                    <button class="button button-danger action-delete" type="button">删除</button>
+                </div>
+            </div>
+        </article>
+    </template>
+
+    <script src="./app.js"></script>
+</body>
+</html>
