@@ -1,2 +1,12 @@
 skills-lock.json
-.agents/skills/find-skills/SKILL.md
+
+# AI / agent 本地工具目录
+.agents/
+
+# 扩展管理脚本生成的本地用户配置与状态
+.sillytavern_extension_manager.conf
+.sillytavern_extension_whitelist
+.sillytavern_extension_whitelist.tmp.*
+
+# Python 运行缓存
+__pycache__/
