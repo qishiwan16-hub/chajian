@@ -38,6 +38,8 @@ updated_count=0
 no_update_count=0
 skipped_count=0
 failed_count=0
+SKIPPED_DETAILS=()
+FAILED_DETAILS=()
 
 PLUGIN_NAMES=()
 PLUGIN_PATHS=()
@@ -544,6 +546,65 @@ reset_update_stats() {
     no_update_count=0
     skipped_count=0
     failed_count=0
+    SKIPPED_DETAILS=()
+    FAILED_DETAILS=()
+}
+
+record_skipped_detail() {
+    local plugin_name="$1"
+    local reason="$2"
+
+    SKIPPED_DETAILS+=("${plugin_name}：${reason}")
+}
+
+record_failed_detail() {
+    local plugin_name="$1"
+    local reason="$2"
+
+    FAILED_DETAILS+=("${plugin_name}：${reason}")
+}
+
+summarize_command_error() {
+    local raw_output="$1"
+    local line=""
+    local summary=""
+
+    raw_output=${raw_output//$'\r'/}
+
+    while IFS= read -r line; do
+        line=$(trim_spaces "$line")
+        [ -n "$line" ] || continue
+        summary="$line"
+        break
+    done <<< "$raw_output"
+
+    if [ -z "$summary" ]; then
+        summary="未提供详细错误信息"
+    fi
+
+    if [ "${#summary}" -gt 120 ]; then
+        summary="${summary:0:117}..."
+    fi
+
+    printf '%s\n' "$summary"
+}
+
+print_summary_detail_list() {
+    local title="$1"
+    local empty_text="$2"
+    local item=""
+
+    shift 2
+
+    printf '\n%s：\n' "$title"
+    if [ "$#" -eq 0 ]; then
+        printf '%s\n' "$empty_text"
+        return
+    fi
+
+    for item in "$@"; do
+        printf -- '- %s\n' "$item"
+    done
 }
 
 # 使用非交互 Git，避免远程仓库转私有/失效时卡在认证输入。
@@ -589,6 +650,7 @@ scan_extensions_dir() {
     local label="$2"
     local repo_dir=""
     local repo_name=""
+    local repo_display_name=""
     local upstream_ref=""
     local remote_name=""
     local remote_check_output=""
@@ -615,18 +677,21 @@ scan_extensions_dir() {
         found_any=1
 
         repo_name=${repo_dir##*/}
+        repo_display_name="${repo_name}（${label}）"
         checked_count=$((checked_count + 1))
 
         printf '[检查] %s\n' "$repo_name"
 
         if is_whitelisted "$repo_name"; then
             skipped_count=$((skipped_count + 1))
+            record_skipped_detail "$repo_display_name" "命中白名单"
             printf '  -> [跳过] 命中白名单，已跳过更新检测\n\n'
             continue
         fi
 
         if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
             skipped_count=$((skipped_count + 1))
+            record_skipped_detail "$repo_display_name" "不是 Git 仓库"
             printf '  -> [跳过] 不是 Git 仓库\n\n'
             continue
         fi
@@ -634,6 +699,7 @@ scan_extensions_dir() {
         upstream_ref=$(git -C "$repo_dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
         if [ -z "$upstream_ref" ]; then
             skipped_count=$((skipped_count + 1))
+            record_skipped_detail "$repo_display_name" "未配置上游分支"
             printf '  -> [跳过] Git 仓库未配置上游分支\n\n'
             continue
         fi
@@ -644,9 +710,11 @@ scan_extensions_dir() {
         if [ "$remote_check_status" -ne 0 ]; then
             if is_remote_access_issue "$remote_check_output"; then
                 skipped_count=$((skipped_count + 1))
+                record_skipped_detail "$repo_display_name" "远程仓库不可访问（$(summarize_command_error "$remote_check_output")）"
                 printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
             else
                 failed_count=$((failed_count + 1))
+                record_failed_detail "$repo_display_name" "无法访问远程仓库（$(summarize_command_error "$remote_check_output")）"
                 printf '  -> [失败] 无法访问远程仓库\n'
             fi
             printf '%s\n\n' "$remote_check_output"
@@ -658,9 +726,11 @@ scan_extensions_dir() {
         if [ "$fetch_status" -ne 0 ]; then
             if is_remote_access_issue "$fetch_output"; then
                 skipped_count=$((skipped_count + 1))
+                record_skipped_detail "$repo_display_name" "远程仓库不可访问（$(summarize_command_error "$fetch_output")）"
                 printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
             else
                 failed_count=$((failed_count + 1))
+                record_failed_detail "$repo_display_name" "fetch 失败（$(summarize_command_error "$fetch_output")）"
                 printf '  -> [失败] fetch 失败\n'
             fi
             printf '%s\n\n' "$fetch_output"
@@ -670,6 +740,7 @@ scan_extensions_dir() {
         counts=$(git -C "$repo_dir" rev-list --left-right --count "HEAD...$upstream_ref" 2>/dev/null)
         if [ -z "$counts" ]; then
             failed_count=$((failed_count + 1))
+            record_failed_detail "$repo_display_name" "无法比较本地与远程差异"
             printf '  -> [失败] 无法比较本地与远程差异\n\n'
             continue
         fi
@@ -700,9 +771,11 @@ scan_extensions_dir() {
         else
             if is_remote_access_issue "$pull_output"; then
                 skipped_count=$((skipped_count + 1))
+                record_skipped_detail "$repo_display_name" "拉取时远程仓库不可访问（$(summarize_command_error "$pull_output")）"
                 printf '  -> [跳过] 拉取时远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
             else
                 failed_count=$((failed_count + 1))
+                record_failed_detail "$repo_display_name" "pull 失败（$(summarize_command_error "$pull_output")）"
                 printf '  -> [失败] pull 失败\n'
             fi
             printf '%s\n\n' "$pull_output"
@@ -755,6 +828,9 @@ run_update_flow() {
     printf '无更新仓库：%s\n' "$no_update_count"
     printf '已跳过项目：%s\n' "$skipped_count"
     printf '失败项目数：%s\n' "$failed_count"
+
+    print_summary_detail_list "跳过项目列表" "无" "${SKIPPED_DETAILS[@]}"
+    print_summary_detail_list "失败项目列表" "无" "${FAILED_DETAILS[@]}"
 }
 
 collect_plugins_from_dir() {
