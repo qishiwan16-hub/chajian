@@ -47,6 +47,9 @@ PLUGIN_SOURCES=()
 WHITELIST_ITEMS=()
 PARSED_ITEMS=()
 
+COLOR_RED=""
+COLOR_RESET=""
+
 shopt -s nullglob
 
 trim_spaces() {
@@ -61,6 +64,26 @@ trim_spaces() {
 press_enter_to_continue() {
     printf '\n按回车继续...'
     IFS= read -r _unused_input
+}
+
+init_color_output() {
+    if [ -t 1 ] && [ -n "$TERM" ] && [ "$TERM" != "dumb" ] && [ -z "$NO_COLOR" ]; then
+        COLOR_RED=$'\033[31m'
+        COLOR_RESET=$'\033[0m'
+    else
+        COLOR_RED=""
+        COLOR_RESET=""
+    fi
+}
+
+format_red_text() {
+    local text="$1"
+
+    if [ -n "$COLOR_RED" ] && [ -n "$COLOR_RESET" ]; then
+        printf '%s%s%s' "$COLOR_RED" "$text" "$COLOR_RESET"
+    else
+        printf '%s' "$text"
+    fi
 }
 
 expand_home_path() {
@@ -589,6 +612,37 @@ summarize_command_error() {
     printf '%s\n' "$summary"
 }
 
+print_summary_detail_item() {
+    local item="$1"
+    local detail_head=""
+    local remaining_text=""
+    local plugin_name=""
+    local source_text=""
+
+    detail_head=${item%%：*}
+    if [ "$detail_head" = "$item" ]; then
+        printf '%s\n' "$item"
+        return
+    fi
+
+    remaining_text=${item#"$detail_head"}
+    plugin_name="$detail_head"
+    source_text=""
+
+    case "$detail_head" in
+        *"（public）")
+            plugin_name=${detail_head%（public）}
+            source_text='（public）'
+            ;;
+        *"（user）")
+            plugin_name=${detail_head%（user）}
+            source_text='（user）'
+            ;;
+    esac
+
+    printf '%s%s%s\n' "$(format_red_text "$plugin_name")" "$source_text" "$remaining_text"
+}
+
 print_summary_detail_list() {
     local title="$1"
     local empty_text="$2"
@@ -603,7 +657,8 @@ print_summary_detail_list() {
     fi
 
     for item in "$@"; do
-        printf -- '- %s\n' "$item"
+        printf -- '- '
+        print_summary_detail_item "$item"
     done
 }
 
@@ -645,10 +700,9 @@ is_remote_access_issue() {
     return 1
 }
 
-scan_extensions_dir() {
-    local base_dir="$1"
-    local label="$2"
-    local repo_dir=""
+process_plugin_update() {
+    local repo_dir="$1"
+    local source_label="$2"
     local repo_name=""
     local repo_display_name=""
     local upstream_ref=""
@@ -662,9 +716,128 @@ scan_extensions_dir() {
     local remote_ahead=0
     local pull_output=""
     local pull_status=0
+
+    repo_name=${repo_dir##*/}
+    repo_display_name="${repo_name}（${source_label}）"
+    checked_count=$((checked_count + 1))
+
+    printf '[检查] %s\n' "$repo_name"
+
+    if [ ! -d "$repo_dir" ]; then
+        skipped_count=$((skipped_count + 1))
+        record_skipped_detail "$repo_display_name" "目录不存在"
+        printf '  -> [跳过] 目录不存在\n\n'
+        return 0
+    fi
+
+    if is_whitelisted "$repo_name"; then
+        skipped_count=$((skipped_count + 1))
+        record_skipped_detail "$repo_display_name" "命中白名单"
+        printf '  -> [跳过] 命中白名单，已跳过更新检测\n\n'
+        return 0
+    fi
+
+    if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        skipped_count=$((skipped_count + 1))
+        record_skipped_detail "$repo_display_name" "不是 Git 仓库"
+        printf '  -> [跳过] 不是 Git 仓库\n\n'
+        return 0
+    fi
+
+    upstream_ref=$(git -C "$repo_dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+    if [ -z "$upstream_ref" ]; then
+        skipped_count=$((skipped_count + 1))
+        record_skipped_detail "$repo_display_name" "未配置上游分支"
+        printf '  -> [跳过] Git 仓库未配置上游分支\n\n'
+        return 0
+    fi
+
+    remote_name=${upstream_ref%%/*}
+    remote_check_output=$(git_non_interactive -C "$repo_dir" ls-remote --quiet "$remote_name" HEAD 2>&1)
+    remote_check_status=$?
+    if [ "$remote_check_status" -ne 0 ]; then
+        if is_remote_access_issue "$remote_check_output"; then
+            skipped_count=$((skipped_count + 1))
+            record_skipped_detail "$repo_display_name" "远程仓库不可访问（$(summarize_command_error "$remote_check_output")）"
+            printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
+        else
+            failed_count=$((failed_count + 1))
+            record_failed_detail "$repo_display_name" "无法访问远程仓库（$(summarize_command_error "$remote_check_output")）"
+            printf '  -> [失败] 无法访问远程仓库\n'
+        fi
+        printf '%s\n\n' "$remote_check_output"
+        return 0
+    fi
+
+    fetch_output=$(git_non_interactive -C "$repo_dir" fetch --all --prune 2>&1)
+    fetch_status=$?
+    if [ "$fetch_status" -ne 0 ]; then
+        if is_remote_access_issue "$fetch_output"; then
+            skipped_count=$((skipped_count + 1))
+            record_skipped_detail "$repo_display_name" "远程仓库不可访问（$(summarize_command_error "$fetch_output")）"
+            printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
+        else
+            failed_count=$((failed_count + 1))
+            record_failed_detail "$repo_display_name" "fetch 失败（$(summarize_command_error "$fetch_output")）"
+            printf '  -> [失败] fetch 失败\n'
+        fi
+        printf '%s\n\n' "$fetch_output"
+        return 0
+    fi
+
+    counts=$(git -C "$repo_dir" rev-list --left-right --count "HEAD...$upstream_ref" 2>/dev/null)
+    if [ -z "$counts" ]; then
+        failed_count=$((failed_count + 1))
+        record_failed_detail "$repo_display_name" "无法比较本地与远程差异"
+        printf '  -> [失败] 无法比较本地与远程差异\n\n'
+        return 0
+    fi
+
+    set -- $counts
+    local_ahead=$1
+    remote_ahead=$2
+
+    if [ "$remote_ahead" -eq 0 ]; then
+        no_update_count=$((no_update_count + 1))
+        if [ "$local_ahead" -gt 0 ]; then
+            printf '  -> [无更新] 远程没有新提交（本地领先 %s 个提交）\n\n' "$local_ahead"
+        else
+            printf '  -> [无更新] 本地已是最新\n\n'
+        fi
+        return 0
+    fi
+
+    pull_output=$(git_non_interactive -C "$repo_dir" pull --ff-only 2>&1)
+    pull_status=$?
+    if [ "$pull_status" -eq 0 ]; then
+        updated_count=$((updated_count + 1))
+        printf '  -> [已更新] 已拉取远程更新（远程领先 %s 个提交）\n' "$remote_ahead"
+        if [ -n "$pull_output" ]; then
+            printf '%s\n' "$pull_output"
+        fi
+        printf '\n'
+    else
+        if is_remote_access_issue "$pull_output"; then
+            skipped_count=$((skipped_count + 1))
+            record_skipped_detail "$repo_display_name" "拉取时远程仓库不可访问（$(summarize_command_error "$pull_output")）"
+            printf '  -> [跳过] 拉取时远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
+        else
+            failed_count=$((failed_count + 1))
+            record_failed_detail "$repo_display_name" "pull 失败（$(summarize_command_error "$pull_output")）"
+            printf '  -> [失败] pull 失败\n'
+        fi
+        printf '%s\n\n' "$pull_output"
+    fi
+}
+
+scan_extensions_dir() {
+    local base_dir="$1"
+    local scan_label="$2"
+    local source_label="$3"
+    local repo_dir=""
     local found_any=0
 
-    printf '\n==== 扫描目录：%s ====\n' "$label"
+    printf '\n==== 扫描目录：%s ====\n' "$scan_label"
     printf '%s\n\n' "$base_dir"
 
     if [ ! -d "$base_dir" ]; then
@@ -675,116 +848,26 @@ scan_extensions_dir() {
     for repo_dir in "$base_dir"/*; do
         [ -d "$repo_dir" ] || continue
         found_any=1
-
-        repo_name=${repo_dir##*/}
-        repo_display_name="${repo_name}（${label}）"
-        checked_count=$((checked_count + 1))
-
-        printf '[检查] %s\n' "$repo_name"
-
-        if is_whitelisted "$repo_name"; then
-            skipped_count=$((skipped_count + 1))
-            record_skipped_detail "$repo_display_name" "命中白名单"
-            printf '  -> [跳过] 命中白名单，已跳过更新检测\n\n'
-            continue
-        fi
-
-        if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            skipped_count=$((skipped_count + 1))
-            record_skipped_detail "$repo_display_name" "不是 Git 仓库"
-            printf '  -> [跳过] 不是 Git 仓库\n\n'
-            continue
-        fi
-
-        upstream_ref=$(git -C "$repo_dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
-        if [ -z "$upstream_ref" ]; then
-            skipped_count=$((skipped_count + 1))
-            record_skipped_detail "$repo_display_name" "未配置上游分支"
-            printf '  -> [跳过] Git 仓库未配置上游分支\n\n'
-            continue
-        fi
-
-        remote_name=${upstream_ref%%/*}
-        remote_check_output=$(git_non_interactive -C "$repo_dir" ls-remote --quiet "$remote_name" HEAD 2>&1)
-        remote_check_status=$?
-        if [ "$remote_check_status" -ne 0 ]; then
-            if is_remote_access_issue "$remote_check_output"; then
-                skipped_count=$((skipped_count + 1))
-                record_skipped_detail "$repo_display_name" "远程仓库不可访问（$(summarize_command_error "$remote_check_output")）"
-                printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
-            else
-                failed_count=$((failed_count + 1))
-                record_failed_detail "$repo_display_name" "无法访问远程仓库（$(summarize_command_error "$remote_check_output")）"
-                printf '  -> [失败] 无法访问远程仓库\n'
-            fi
-            printf '%s\n\n' "$remote_check_output"
-            continue
-        fi
-
-        fetch_output=$(git_non_interactive -C "$repo_dir" fetch --all --prune 2>&1)
-        fetch_status=$?
-        if [ "$fetch_status" -ne 0 ]; then
-            if is_remote_access_issue "$fetch_output"; then
-                skipped_count=$((skipped_count + 1))
-                record_skipped_detail "$repo_display_name" "远程仓库不可访问（$(summarize_command_error "$fetch_output")）"
-                printf '  -> [跳过] 远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
-            else
-                failed_count=$((failed_count + 1))
-                record_failed_detail "$repo_display_name" "fetch 失败（$(summarize_command_error "$fetch_output")）"
-                printf '  -> [失败] fetch 失败\n'
-            fi
-            printf '%s\n\n' "$fetch_output"
-            continue
-        fi
-
-        counts=$(git -C "$repo_dir" rev-list --left-right --count "HEAD...$upstream_ref" 2>/dev/null)
-        if [ -z "$counts" ]; then
-            failed_count=$((failed_count + 1))
-            record_failed_detail "$repo_display_name" "无法比较本地与远程差异"
-            printf '  -> [失败] 无法比较本地与远程差异\n\n'
-            continue
-        fi
-
-        set -- $counts
-        local_ahead=$1
-        remote_ahead=$2
-
-        if [ "$remote_ahead" -eq 0 ]; then
-            no_update_count=$((no_update_count + 1))
-            if [ "$local_ahead" -gt 0 ]; then
-                printf '  -> [无更新] 远程没有新提交（本地领先 %s 个提交）\n\n' "$local_ahead"
-            else
-                printf '  -> [无更新] 本地已是最新\n\n'
-            fi
-            continue
-        fi
-
-        pull_output=$(git_non_interactive -C "$repo_dir" pull --ff-only 2>&1)
-        pull_status=$?
-        if [ "$pull_status" -eq 0 ]; then
-            updated_count=$((updated_count + 1))
-            printf '  -> [已更新] 已拉取远程更新（远程领先 %s 个提交）\n' "$remote_ahead"
-            if [ -n "$pull_output" ]; then
-                printf '%s\n' "$pull_output"
-            fi
-            printf '\n'
-        else
-            if is_remote_access_issue "$pull_output"; then
-                skipped_count=$((skipped_count + 1))
-                record_skipped_detail "$repo_display_name" "拉取时远程仓库不可访问（$(summarize_command_error "$pull_output")）"
-                printf '  -> [跳过] 拉取时远程仓库不可访问（可能已转私有 / 不存在 / 需要认证）\n'
-            else
-                failed_count=$((failed_count + 1))
-                record_failed_detail "$repo_display_name" "pull 失败（$(summarize_command_error "$pull_output")）"
-                printf '  -> [失败] pull 失败\n'
-            fi
-            printf '%s\n\n' "$pull_output"
-        fi
+        process_plugin_update "$repo_dir" "$source_label"
     done
 
     if [ "$found_any" -eq 0 ]; then
         printf '[目录为空] %s 下没有可检查的子目录\n' "$base_dir"
     fi
+}
+
+print_update_summary() {
+    printf '\n==== 汇总统计 ====\n'
+    printf 'SillyTavern 根目录：%s\n' "$ACTIVE_ST_ROOT"
+    printf '用户目录名：%s\n' "$ACTIVE_USER_NAME"
+    printf '已检查子目录：%s\n' "$checked_count"
+    printf '已更新仓库：%s\n' "$updated_count"
+    printf '无更新仓库：%s\n' "$no_update_count"
+    printf '已跳过项目：%s\n' "$skipped_count"
+    printf '失败项目数：%s\n' "$failed_count"
+
+    print_summary_detail_list "跳过项目列表" "无" "${SKIPPED_DETAILS[@]}"
+    print_summary_detail_list "失败项目列表" "无" "${FAILED_DETAILS[@]}"
 }
 
 run_update_flow() {
@@ -817,20 +900,10 @@ run_update_flow() {
     printf '1) %s\n' "$third_party_dir"
     printf '2) %s\n' "$user_extensions_dir"
 
-    scan_extensions_dir "$third_party_dir" "第三方扩展目录"
-    scan_extensions_dir "$user_extensions_dir" "用户扩展目录"
+    scan_extensions_dir "$third_party_dir" "第三方扩展目录" "public"
+    scan_extensions_dir "$user_extensions_dir" "用户扩展目录" "user"
 
-    printf '\n==== 汇总统计 ====\n'
-    printf 'SillyTavern 根目录：%s\n' "$ACTIVE_ST_ROOT"
-    printf '用户目录名：%s\n' "$ACTIVE_USER_NAME"
-    printf '已检查子目录：%s\n' "$checked_count"
-    printf '已更新仓库：%s\n' "$updated_count"
-    printf '无更新仓库：%s\n' "$no_update_count"
-    printf '已跳过项目：%s\n' "$skipped_count"
-    printf '失败项目数：%s\n' "$failed_count"
-
-    print_summary_detail_list "跳过项目列表" "无" "${SKIPPED_DETAILS[@]}"
-    print_summary_detail_list "失败项目列表" "无" "${FAILED_DETAILS[@]}"
+    print_update_summary
 }
 
 collect_plugins_from_dir() {
@@ -899,6 +972,79 @@ view_plugins_workflow() {
     print_plugin_sources "$ACTIVE_ST_ROOT" "$ACTIVE_USER_NAME"
     collect_plugins "$ACTIVE_ST_ROOT" "$ACTIVE_USER_NAME"
     display_plugins
+}
+
+batch_update_workflow() {
+    local raw_input=""
+    local selected_numbers=()
+    local token=""
+    local index=0
+
+    require_git || return 1
+    prepare_context_interactive "$1" "$2" || return 1
+    print_plugin_sources "$ACTIVE_ST_ROOT" "$ACTIVE_USER_NAME"
+    collect_plugins "$ACTIVE_ST_ROOT" "$ACTIVE_USER_NAME"
+
+    if [ "${#PLUGIN_NAMES[@]}" -eq 0 ]; then
+        printf '\n未找到任何可更新插件。\n'
+        return 0
+    fi
+
+    display_plugins
+
+    printf '\n请输入要更新的序号，多个可用逗号分隔（将按输入顺序执行）：'
+    IFS= read -r raw_input
+    split_csv_to_array "$raw_input"
+
+    if [ "${#PARSED_ITEMS[@]}" -eq 0 ]; then
+        printf '未输入任何有效序号，已取消批量更新。\n'
+        return 0
+    fi
+
+    for token in "${PARSED_ITEMS[@]}"; do
+        case "$token" in
+            *[!0-9]*|'')
+                printf '[跳过] 非法序号：%s\n' "$token"
+                continue
+                ;;
+        esac
+
+        if [ "$token" -lt 1 ] || [ "$token" -gt "${#PLUGIN_NAMES[@]}" ]; then
+            printf '[跳过] 序号超出范围：%s\n' "$token"
+            continue
+        fi
+
+        if array_contains "$token" "${selected_numbers[@]}"; then
+            printf '[跳过] 重复序号：%s\n' "$token"
+            continue
+        fi
+
+        selected_numbers+=("$token")
+    done
+
+    if [ "${#selected_numbers[@]}" -eq 0 ]; then
+        printf '没有可更新的有效序号。\n'
+        return 0
+    fi
+
+    printf '\n==== 批量更新顺序 ====\n'
+    for token in "${selected_numbers[@]}"; do
+        index=$((token - 1))
+        printf '%s. %s | 来源：%s\n' \
+            "$token" \
+            "${PLUGIN_NAMES[index]}" \
+            "${PLUGIN_SOURCES[index]}"
+    done
+
+    reset_update_stats
+
+    printf '\n==== 开始批量更新 ====\n'
+    for token in "${selected_numbers[@]}"; do
+        index=$((token - 1))
+        process_plugin_update "${PLUGIN_PATHS[index]}" "${PLUGIN_SOURCES[index]}"
+    done
+
+    print_update_summary
 }
 
 remove_autostart_block_from_file() {
@@ -1264,10 +1410,11 @@ main_menu() {
         load_config
         printf '\n==== SillyTavern 扩展管理面板 ====\n'
         printf '1. 一键更新\n'
-        printf '2. 白名单管理\n'
-        printf '3. 插件查看\n'
-        printf '4. 删除插件\n'
-        printf '5. 设置\n'
+        printf '2. 批量更新脚本\n'
+        printf '3. 白名单管理\n'
+        printf '4. 插件查看\n'
+        printf '5. 删除插件\n'
+        printf '6. 设置\n'
         printf '0. 退出\n'
         printf '请选择：'
         IFS= read -r menu_choice
@@ -1278,17 +1425,21 @@ main_menu() {
                 press_enter_to_continue
                 ;;
             2)
-                whitelist_menu
+                batch_update_workflow "" ""
+                press_enter_to_continue
                 ;;
             3)
+                whitelist_menu
+                ;;
+            4)
                 view_plugins_workflow "" ""
                 press_enter_to_continue
                 ;;
-            4)
+            5)
                 delete_plugins_workflow "" ""
                 press_enter_to_continue
                 ;;
-            5)
+            6)
                 settings_menu
                 ;;
             0)
@@ -1303,6 +1454,7 @@ main_menu() {
     done
 }
 
+init_color_output
 load_config
 
 case "$1" in
