@@ -17,22 +17,18 @@ Termux 里建议先安装 Git：
 pkg install git
 ```
 
-脚本现在要求用 `bash` 启动：
+进入项目目录后，直接执行：
 
 ```sh
-chmod +x ./update_sillytavern_extensions_termux.sh
+cd chajian
 bash ./update_sillytavern_extensions_termux.sh
 ```
 
-也可以直接执行更新：
-
-```sh
-bash ./update_sillytavern_extensions_termux.sh --run-update
-```
+启动后会直接进入脚本面板，输入对应数字即可进入功能。
 
 ## 菜单功能
 
-运行后会进入管理面板：
+默认启动后会进入管理面板，输入对应数字即可进入对应功能：
 
 1. 一键更新
 2. 白名单管理
@@ -119,6 +115,16 @@ bash ./update_sillytavern_extensions_termux.sh --run-update
 自动启动时不会进入菜单，而是直接执行更新流程；如果没识别到 SillyTavern 根目录或缺少必要条件，会安全跳过，不会卡住。
 
 这个自动启动逻辑只在 Termux 下生效；在电脑上运行脚本时，不会去改你本机的 shell 启动文件。
+
+## 补充：参数方式
+
+如果你明确想跳过面板，也可以直接执行更新：
+
+```sh
+bash ./update_sillytavern_extensions_termux.sh --run-update
+```
+
+`--auto-start-check` 仅供“打开 Termux 时自动检测更新”功能内部使用。
 
 ## 说明
 
