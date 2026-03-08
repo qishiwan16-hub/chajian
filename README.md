@@ -11,21 +11,7 @@
 
 如果子目录本身是 Git 仓库，就自动检查远程更新；有更新就拉取，没更新就跳过；单个仓库失败也不会中断整个过程，最后会输出统计结果。
 
-## 如何拉取到本地
-
-### 第一次拉取
-
-```sh
-git clone https://github.com/qishiwan16-hub/chajian.git
-cd chajian
-```
-
-### 已经拉取过，更新到最新
-
-```sh
-cd chajian
-git pull
-```
+## 如何获取并使用脚本（最稳妥）
 
 如果你的 Termux 还没装 Git，先执行：
 
@@ -33,13 +19,31 @@ git pull
 pkg install git
 ```
 
-## 如何运行
+### 情况 A：文件已经在本地
 
-先进入脚本所在目录：
+如果你已经把这个脚本文件放到本地了，就**不要重复 `git clone`**，直接进入脚本所在目录即可：
 
 ```sh
 cd chajian
 ```
+
+> 如果你的本地目录名不是 `chajian`，把上面命令里的目录名改成你自己的实际目录名。
+
+### 情况 B：本地还没有文件，再执行一次 `git clone`
+
+```sh
+git clone https://github.com/你的用户名/你的仓库名.git
+cd 你的仓库目录名
+```
+
+注意：
+
+- 上面的仓库地址只是**示例格式**，请替换成你自己的**真实仓库地址**。
+- `git clone` 这一行结尾**不能多任何字符**，尤其不能多 `~`。
+- 也就是说，命令应当在 `.git` 处结束，不要写成 `...git~`、`...git。`、`...git/` 之类。
+- 如果你已经在本地拿到了脚本，就跳过这一步，直接进入脚本目录运行。
+
+### 运行脚本
 
 给脚本执行权限：
 
@@ -58,6 +62,24 @@ chmod +x ./update_sillytavern_extensions_termux.sh
 ```sh
 sh ./update_sillytavern_extensions_termux.sh
 ```
+
+## 你图里的报错是什么意思
+
+你图里执行的是类似下面这种命令：
+
+```sh
+git clone https://github.com/qishiwan16-hub/chajian.git~
+```
+
+这里最后多了一个 `~`，Git 会把它当成仓库地址的一部分，也就是去找 `chajian.git~` 这个仓库，所以才会出现“仓库不存在 / URL not found”。
+
+正确写法应当是：
+
+```sh
+git clone https://github.com/你的用户名/你的仓库名.git
+```
+
+或者，如果文件已经在本地，就不要重新 `clone`，直接进入目录后运行脚本。
 
 ## 运行时需要输入什么
 
