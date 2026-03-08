@@ -810,11 +810,10 @@ display_plugins() {
         if is_whitelisted "${PLUGIN_NAMES[index]}"; then
             mark=' [白名单]'
         fi
-        printf '%s. %s | 来源：%s | 路径：%s%s\n' \
+        printf '%s. %s | 来源：%s%s\n' \
             "$((index + 1))" \
             "${PLUGIN_NAMES[index]}" \
             "${PLUGIN_SOURCES[index]}" \
-            "${PLUGIN_PATHS[index]}" \
             "$mark"
     done
 }
@@ -1089,11 +1088,10 @@ delete_plugins_workflow() {
     printf '\n将删除以下插件：\n'
     for token in "${selected_numbers[@]}"; do
         index=$((token - 1))
-        printf '%s. %s | 来源：%s | 路径：%s\n' \
+        printf '%s. %s | 来源：%s\n' \
             "$token" \
             "${PLUGIN_NAMES[index]}" \
-            "${PLUGIN_SOURCES[index]}" \
-            "${PLUGIN_PATHS[index]}"
+            "${PLUGIN_SOURCES[index]}"
     done
 
     printf '请输入 y 确认删除：'
